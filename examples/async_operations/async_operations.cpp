@@ -26,7 +26,7 @@ int main() {
 
     try {
         // Check CUDA availability
-        if (!CUDA_DRIVER_INSTANCE.loaded() || !NVRTC_INSTANCE.loaded() || !CUDART_INSTANCE.loaded()) {
+        if (!gpulite::CUDADriver::loaded() || !gpulite::NVRTC::loaded() || !gpulite::CUDART::loaded()) {
             std::cerr << "Error: CUDA runtime libraries not available" << std::endl;
             return 1;
         }
@@ -64,7 +64,7 @@ int main() {
         GPULITE_CUDART_CALL(cudaStreamCreate(&streams[1]));
 
         // Compile kernel
-        auto& factory = KernelFactory::instance(CUdevice(0));
+        auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
         std::cout << "\nCompiling kernel..." << std::endl;
         auto* kernel = factory.create(
             "scale_array",

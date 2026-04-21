@@ -12,7 +12,7 @@
 int main() {
     try {
         // Check if CUDA is available
-        if (!CUDA_DRIVER_INSTANCE.loaded() || !NVRTC_INSTANCE.loaded() || !CUDART_INSTANCE.loaded()) {
+        if (!gpulite::CUDADriver::loaded() || !gpulite::NVRTC::loaded() || !gpulite::CUDART::loaded()) {
             std::cout << "CUDA runtime libraries not available. Please install the CUDA SDK and drivers." << std::endl;
             return 1;
         }
@@ -58,7 +58,7 @@ extern "C" __global__ void vector_add(float* a, float* b, float* c, int n) {
         GPULITE_CUDART_CALL(cudaMemcpy(d_b, h_b.data(), size, cudaMemcpyHostToDevice));
 
         // Create and cache kernel
-        auto& factory = KernelFactory::instance(CUdevice(0));
+        auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
         std::cout << "Compiling kernel..." << std::endl;
 
         auto start = std::chrono::high_resolution_clock::now();
