@@ -35,7 +35,6 @@ endif()
 option(GPULITE_BUILD_EXAMPLES "Build gpulite examples" GPULITE_MAIN_PROJECT)
 
 if(GPULITE_BUILD_EXAMPLES)
-    include(CTest)
     enable_testing()
 
     add_subdirectory(examples/basic_vector_add)
