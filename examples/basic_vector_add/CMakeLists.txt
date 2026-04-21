@@ -21,3 +21,5 @@ endif()
 set_target_properties(vector_add PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+
+add_test(NAME vector_add COMMAND vector_add)

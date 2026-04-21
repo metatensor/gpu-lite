@@ -21,3 +21,5 @@ endif()
 set_target_properties(templated_kernels PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+
+add_test(NAME templated_kernels COMMAND templated_kernels)

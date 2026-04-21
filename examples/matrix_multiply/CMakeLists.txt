@@ -21,3 +21,5 @@ endif()
 set_target_properties(matrix_multiply PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+
+add_test(NAME matrix_multiply COMMAND matrix_multiply)

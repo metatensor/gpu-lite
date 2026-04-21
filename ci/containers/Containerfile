@@ -1,0 +1,10 @@
+FROM docker://nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
+
+ENV CUDA_HOME="/usr/local/cuda"
+
+RUN apt update && apt install -y cmake ninja-build && apt clean
+
+COPY . /gpu-lite/
+WORKDIR /gpu-lite/
+
+RUN cmake -S . -B build -GNinja -DGPULITE_BUILD_EXAMPLES=ON && cmake --build build
