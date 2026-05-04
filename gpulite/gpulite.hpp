@@ -276,13 +276,40 @@ namespace details {
 // Define a template to dynamically load symbols
 template <typename FuncType> FuncType loadSymbol(void* handle, const char* functionName) {
 #if defined(__linux__) || defined(__APPLE__)
+    dlerror(); // Clear any existing error
     auto func = reinterpret_cast<FuncType>(dlsym(handle, functionName));
+
+    if (!func) {
+        auto* error = dlerror();
+        throw std::runtime_error(
+            std::string("Failed to load function: ") + functionName + ": " +
+            (error ? error : "unknown error")
+        );
+    }
 #elif defined(_WIN32)
     auto func = reinterpret_cast<FuncType>(GetProcAddress(static_cast<HMODULE>(handle), functionName));
-#endif
+
     if (!func) {
-        throw std::runtime_error(std::string("Failed to load function: ") + functionName);
+        auto errorCode = GetLastError();
+        LPSTR errorMsg = nullptr;
+        FormatMessageA(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            errorCode,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPSTR>(&errorMsg),
+            0,
+            nullptr
+        );
+        auto errorStr = (
+            "Failed to load function: " + std::string(functionName) + ": " +
+            (errorMsg ? errorMsg : "unknown error")
+        );
+        LocalFree(errorMsg);
+        throw std::runtime_error(std::move(errorStr));
     }
+#endif
+
     return func;
 }
 
