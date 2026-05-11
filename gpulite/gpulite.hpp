@@ -1282,7 +1282,7 @@ class KernelFactory {
     /// This ensures that each CUDA device has its own kernel cache.
     static KernelFactory& instance(CUdevice device) {
         static std::list<KernelFactory> INSTANCES;
-        for (size_t i = INSTANCES.size(); i < device + 1; i++) {
+        for (int i = INSTANCES.size(); i < device + 1; i++) {
             INSTANCES.emplace_back(KernelFactory());
         }
 
