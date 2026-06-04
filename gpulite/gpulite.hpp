@@ -8,6 +8,7 @@
 
 #include <list>
 #include <mutex>
+#include <tuple>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <filesystem>
+#include <type_traits>
 #include <unordered_map>
 
 
@@ -232,6 +234,11 @@ struct cudaPointerAttributes {
 #define cudaHostAllocPortable               0x01
 #define cudaHostAllocMapped                 0x02
 #define cudaHostAllocWriteCombined          0x04
+
+// allow including `.cuh` files in the CPU code
+#if !defined(__CUDACC__) && !defined(__global__)
+#define __global__
+#endif
 
 // ========================================================================== //
 //                          NVRTC API (from nvrtc.h)                          //
@@ -606,6 +613,64 @@ template <typename T, typename... Ts> std::string buildTemplateTypes() {
     return result;
 }
 
+template <typename FuncType> struct function_traits;
+
+template <typename Ret, typename... Args>
+struct function_traits<Ret(Args...)> {
+    using args_tuple = std::tuple<Args...>;
+    using return_type = Ret;
+};
+
+template <typename From, typename To>
+struct arg_compatible : std::is_same<From, To> {};
+
+// Allow T* -> const T*
+template <typename T>
+struct arg_compatible<T*, const T*> : std::true_type {};
+
+template <typename... Expected, typename... Actual>
+struct arg_compatible<
+    std::tuple<Expected...>,
+    std::tuple<Actual...>>
+    : std::bool_constant<
+          sizeof...(Expected) == sizeof...(Actual) &&
+          (arg_compatible<Actual, Expected>::value && ...)
+      >
+{};
+
+template <typename Expected, typename Actual>
+inline constexpr bool arg_compatible_v = arg_compatible<Expected, Actual>::value;
+
+template <std::size_t ArgIndex, typename Expected, typename Actual>
+struct argument_mismatch;
+
+template <std::size_t ArgIndex, typename Expected, typename Actual>
+constexpr void check_arg() {
+    static_assert(
+        arg_compatible<Actual, Expected>::value,
+        "argument type mismatch (check first template parameter for argument index)"
+    );
+}
+
+template <typename ExpectedTuple, typename ActualTuple, std::size_t... ArgIndices>
+constexpr void check_tuple_impl(std::index_sequence<ArgIndices...>) {
+    (check_arg<
+        ArgIndices,
+        std::tuple_element_t<ArgIndices, ExpectedTuple>,
+        std::tuple_element_t<ArgIndices, ActualTuple>
+    >(), ...);
+}
+
+template <typename FuncType, typename ...Actual>
+constexpr void check_tuple_arguments() {
+    using ExpectedTuple = typename details::function_traits<FuncType>::args_tuple;
+    using ActualTuple = std::tuple<std::decay_t<Actual>...>;
+
+    static_assert(std::tuple_size_v<ExpectedTuple> == std::tuple_size_v<ActualTuple>, "different number of arguments");
+
+    check_tuple_impl<ExpectedTuple, ActualTuple>(std::make_index_sequence<std::tuple_size_v<ExpectedTuple>>{});
+}
+
 } // namespace details
 
 // Base case: No template arguments, return function name without any type information
@@ -807,6 +872,12 @@ class CUDADriver {
     using cuDeviceGetAttribute_t = CUresult (*)(int*, CUdevice_attribute, CUdevice);
     using cuDeviceGetName_t = CUresult (*)(char*, int, CUdevice);
     using cuDeviceTotalMem_t = CUresult (*)(size_t*, CUdevice);
+    using cuStreamCreate_t = CUresult (*)(CUstream*, unsigned int);
+    using cuStreamDestroy_t = CUresult (*)(CUstream);
+    using cuCtxSynchronize_t = CUresult (*)(void);
+    using cuGetErrorName_t = CUresult (*)(CUresult, const char**);
+    using cuCtxPushCurrent_t = CUresult (*)(CUcontext);
+    using cuPointerGetAttribute_t = CUresult (*)(void*, CUpointer_attribute, CUdeviceptr);
     using cuLaunchKernel_t = CUresult (*)(
         CUfunction,
         unsigned int,
@@ -820,12 +891,6 @@ class CUDADriver {
         void**,
         void*
     );
-    using cuStreamCreate_t = CUresult (*)(CUstream*, unsigned int);
-    using cuStreamDestroy_t = CUresult (*)(CUstream);
-    using cuCtxSynchronize_t = CUresult (*)(void);
-    using cuGetErrorName_t = CUresult (*)(CUresult, const char**);
-    using cuCtxPushCurrent_t = CUresult (*)(CUcontext);
-    using cuPointerGetAttribute_t = CUresult (*)(void*, CUpointer_attribute, CUdeviceptr);
 
     cuInit_t cuInit;
     cuDeviceGetCount_t cuDeviceGetCount;
@@ -843,13 +908,13 @@ class CUDADriver {
     cuDeviceGetAttribute_t cuDeviceGetAttribute;
     cuDeviceGetName_t cuDeviceGetName;
     cuDeviceTotalMem_t cuDeviceTotalMem;
-    cuLaunchKernel_t cuLaunchKernel;
     cuStreamCreate_t cuStreamCreate;
     cuStreamDestroy_t cuStreamDestroy;
     cuGetErrorName_t cuGetErrorName;
     cuCtxSynchronize_t cuCtxSynchronize;
     cuCtxPushCurrent_t cuCtxPushCurrent;
     cuPointerGetAttribute_t cuPointerGetAttribute;
+    cuLaunchKernel_t cuLaunchKernel;
 
     CUDADriver() {
 #if defined(__linux__) || defined(__APPLE__)
@@ -890,13 +955,13 @@ class CUDADriver {
             cuDeviceGetAttribute = details::loadSymbol<cuDeviceGetAttribute_t>(cudaHandle, "cuDeviceGetAttribute");
             cuDeviceGetName = details::loadSymbol<cuDeviceGetName_t>(cudaHandle, "cuDeviceGetName");
             cuDeviceTotalMem = details::loadSymbol<cuDeviceTotalMem_t>(cudaHandle, "cuDeviceTotalMem");
-            cuLaunchKernel = details::loadSymbol<cuLaunchKernel_t>(cudaHandle, "cuLaunchKernel");
             cuStreamCreate = details::loadSymbol<cuStreamCreate_t>(cudaHandle, "cuStreamCreate");
             cuStreamDestroy = details::loadSymbol<cuStreamDestroy_t>(cudaHandle, "cuStreamDestroy");
             cuCtxSynchronize = details::loadSymbol<cuCtxSynchronize_t>(cudaHandle, "cuCtxSynchronize");
             cuGetErrorName = details::loadSymbol<cuGetErrorName_t>(cudaHandle, "cuGetErrorName");
             cuCtxPushCurrent = details::loadSymbol<cuCtxPushCurrent_t>(cudaHandle, "cuCtxPushCurrent");
             cuPointerGetAttribute = details::loadSymbol<cuPointerGetAttribute_t>(cudaHandle, "cuPointerGetAttribute");
+            cuLaunchKernel = details::loadSymbol<cuLaunchKernel_t>(cudaHandle, "cuLaunchKernel");
         }
     }
 
@@ -1110,30 +1175,39 @@ inline const char* nvrtcErrorString(nvrtcResult error) {
 // CUDA Kernel Cache Manager - Runtime compilation and caching system
 // =============================================================================
 
+struct LaunchConfig {
+    dim3 gridDim = dim3(1);
+    dim3 blockDim = dim3(1);
+    size_t dynamicSmemBytes = 0;
+    cudaStream_t stream = nullptr;
+};
+
 /// Container class for the cached kernels. Provides functionality for launching
 /// compiled kernels as well as automatically resizing dynamic shared memory
 /// allocations, when needed. Kernels are compiled on first launch.
-class CachedKernel {
+class CachedKernelBase {
   public:
-    CachedKernel(
+    CachedKernelBase(
         std::string kernel_name,
-        std::string kernel_code,
-        std::string source_name,
+        std::string code,
+        std::string path,
         std::vector<std::string> options
     ) {
         this->kernel_name = kernel_name;
-        this->kernel_code = kernel_code;
-        this->source_name = source_name;
+        this->code = code;
+        this->path = path;
         this->options = options;
     }
 
-    CachedKernel() = default;
+    CachedKernelBase() = default;
+
+    virtual ~CachedKernelBase() = default;
 
     // Copy constructor
-    CachedKernel(const CachedKernel&) = default;
+    CachedKernelBase(const CachedKernelBase&) = default;
 
     // Copy assignment operator
-    CachedKernel& operator=(const CachedKernel&) = default;
+    CachedKernelBase& operator=(const CachedKernelBase&) = default;
 
     inline void setFuncAttribute(CUfunction_attribute attribute, int value) const {
         GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(function, attribute, value));
@@ -1145,54 +1219,40 @@ class CachedKernel {
         return value;
     }
 
-    /// Launch the kernel, and optionally synchronizes until control can be
-    /// passed back to host.
-    void launch(
-        dim3 grid,
-        dim3 block,
-        size_t shared_mem_size,
-        void* cuda_stream,
-        std::vector<void*> args,
-        bool synchronize = true
-    ) {
+  protected:
+    /// Internal launch with void* args. Used by CachedKernel<FuncType>::launch.
+    void launchRaw(const LaunchConfig& config, std::vector<void*> args) {
 
         if (!compiled) {
             this->compileKernel(args);
         }
 
         CUcontext currentContext = nullptr;
-        // Get current context
         CUresult result = CUDADriver::instance().cuCtxGetCurrent(&currentContext);
 
         if (result != CUDA_SUCCESS || !currentContext) {
-            throw std::runtime_error("CachedKernel::launch error getting current context.");
+            throw std::runtime_error("CachedKernelBase::launch error getting current context.");
         }
 
         if (currentContext != context) {
             GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(context));
         }
 
-        this->checkAndAdjustSharedMem(shared_mem_size);
+        this->checkAndAdjustSharedMem(config.dynamicSmemBytes);
 
-        CUstream cstream = reinterpret_cast<CUstream>(cuda_stream);
-
-        GPULITE_CUDA_DRIVER_CALL(cuLaunchKernel(
+         GPULITE_CUDA_DRIVER_CALL(cuLaunchKernel(
             function,
-            grid.x,
-            grid.y,
-            grid.z,
-            block.x,
-            block.y,
-            block.z,
-            shared_mem_size,
-            cstream,
+            config.gridDim.x,
+            config.gridDim.y,
+            config.gridDim.z,
+            config.blockDim.x,
+            config.blockDim.y,
+            config.blockDim.z,
+            config.dynamicSmemBytes,
+            config.stream,
             args.data(),
-            0
+            nullptr
         ));
-
-        if (synchronize) {
-            GPULITE_CUDA_DRIVER_CALL(cuCtxSynchronize());
-        }
 
         if (currentContext != context) {
             GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(currentContext));
@@ -1232,7 +1292,7 @@ class CachedKernel {
 
             if (query_shared_mem_size > max_smem_size_optin) {
                 throw std::runtime_error(
-                    "CachedKernel::launch requested more smem than available on card."
+                    "CachedKernelBase::launch requested more smem than available on card."
                 );
             } else {
                 GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(
@@ -1291,18 +1351,18 @@ class CachedKernel {
         );
 
         // When debugging, write source to a real file so cuda-gdb can find it
-        std::string effective_source_name = this->source_name;
+        std::string effective_source_name = this->path;
         if (enableDebug) {
             // Create a debug source file in the current working directory
             // Use absolute path so cuda-gdb can reliably find it
             char cwd[4096];
             if (getcwd(cwd, sizeof(cwd)) != nullptr) {
-                effective_source_name = std::string(cwd) + "/" + this->source_name;
+                effective_source_name = std::string(cwd) + "/" + this->path;
             }
 
             std::ofstream debug_source_file(effective_source_name);
             if (debug_source_file.is_open()) {
-                debug_source_file << this->kernel_code;
+                debug_source_file << this->code;
                 debug_source_file.close();
             } else {
                 throw std::runtime_error(
@@ -1314,7 +1374,7 @@ class CachedKernel {
         nvrtcProgram prog;
 
         GPULITE_NVRTC_CALL(nvrtcCreateProgram(
-            &prog, this->kernel_code.c_str(), effective_source_name.c_str(), 0, nullptr, nullptr
+            &prog, this->code.c_str(), effective_source_name.c_str(), 0, nullptr, nullptr
         ));
 
         GPULITE_NVRTC_CALL(nvrtcAddNameExpression(prog, this->kernel_name.c_str()));
@@ -1422,9 +1482,36 @@ class CachedKernel {
     bool compiled = false;
 
     std::string kernel_name;
-    std::string kernel_code;
-    std::string source_name;
+    std::string code;
+    std::string path;
     std::vector<std::string> options;
+};
+
+
+// =============================================================================
+// Type-safe CachedKernel wrapper
+// =============================================================================
+
+/// Type-safe kernel wrapper. The template parameter FuncType is the function
+/// signature of the kernel (e.g. void(float*, float*, int)). Provides a typed
+/// launch() method that checks argument count at compile time.
+template <typename FuncType>
+class CachedKernel : public CachedKernelBase {
+    static_assert(std::is_function_v<FuncType>,
+                  "CachedKernel requires a function type (e.g. void(float*, int))");
+
+  public:
+    using CachedKernelBase::CachedKernelBase;
+
+    /// Launch the kernel with typed arguments. Options like grid/block/sync
+    /// are passed in a cudaLaunchConfig_t struct as the first argument.
+    template <typename... Ts>
+    void launch(const LaunchConfig& config, Ts... args) {
+        details::check_tuple_arguments<FuncType, Ts...>();
+
+        std::vector<void*> kernel_args = { static_cast<void*>(&args)... };
+        launchRaw(config, std::move(kernel_args));
+    }
 };
 
 
@@ -1453,72 +1540,108 @@ class KernelFactory {
         return *it;
     }
 
-    void cacheKernel(
-        const std::string& kernel_name,
-        const std::string& source_path,
-        const std::string& source_name,
-        const std::vector<std::string>& options
-    ) {
-        std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
-        kernel_cache_[kernel_name] =
-            std::make_unique<CachedKernel>(kernel_name, source_path, source_name, options);
-    }
-
+    /// Check if a kernel with the given name exists in the cache.
     bool hasKernel(const std::string& kernel_name) {
         std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
         return kernel_cache_.find(kernel_name) != kernel_cache_.end();
     }
 
-    CachedKernel* getKernel(const std::string& kernel_name) {
+    /// Retrieve a previously cached kernel. FuncType must match the type used
+    /// when the kernel was created.
+    template <typename FuncType>
+    CachedKernel<FuncType>* getKernel(const std::string& kernel_name) {
+        static_assert(std::is_function_v<FuncType>,
+                      "FuncType must be a function type (e.g. void(float*, int))");
         std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
         auto it = kernel_cache_.find(kernel_name);
         if (it != kernel_cache_.end()) {
-            return it->second.get();
-        } else {
-            throw std::runtime_error("Kernel not found in cache.");
-        }
-    }
-
-    /// Tries to retrieve the kernel "kernel_name". If not found, instantiate it
-    /// and save to cache.
-    CachedKernel* createFromSource(
-        const std::string& kernel_name,
-        const std::string& source_path,
-        const std::string& source_name,
-        const std::vector<std::string>& options
-    ) {
-        if (!this->hasKernel(kernel_name)) {
-            std::ifstream file(source_path);
-            if (!file.is_open()) {
-                throw std::runtime_error("Failed to open file: " + source_path);
+            auto* ptr = dynamic_cast<CachedKernel<FuncType>*>(it->second.get());
+            if (!ptr) {
+                throw std::runtime_error(
+                    "Kernel type mismatch for '" + kernel_name + "': requested type does not "
+                    "match the type used at creation"
+                );
             }
-            std::ostringstream ss;
-            ss << file.rdbuf();
-
-            std::string kernel_code = ss.str();
-            this->cacheKernel(kernel_name, kernel_code, source_name, options);
+            return ptr;
         }
-        return this->getKernel(kernel_name);
+        throw std::runtime_error("Kernel not found in cache: " + kernel_name);
     }
 
-    /// Tries to retrieve the kernel "kernel_name". If not found, instantiate it
-    /// and save to cache.
-    CachedKernel* create(
+    /// Create or retrieve a kernel from inline source. If the kernel already
+    /// exists in the cache, returns the cached instance. FuncType is the
+    /// function signature of the kernel (e.g. void(float*, float*, int)).
+    template <typename FuncType>
+    CachedKernel<FuncType>* create(
         const std::string& kernel_name,
         const std::string& source_variable,
         const std::string& source_name,
         const std::vector<std::string>& options
     ) {
-        if (!this->hasKernel(kernel_name)) {
-            this->cacheKernel(kernel_name, source_variable, source_name, options);
+        static_assert(std::is_function_v<FuncType>, "FuncType must be a function type (e.g. void(float*, int))");
+        std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
+        auto it = kernel_cache_.find(kernel_name);
+        if (it != kernel_cache_.end()) {
+            auto* ptr = dynamic_cast<CachedKernel<FuncType>*>(it->second.get());
+            if (!ptr) {
+                throw std::runtime_error(
+                    "Kernel type mismatch for '" + kernel_name + "': requested type does not "
+                    "match the type used at creation"
+                );
+            }
+            return ptr;
         }
 
-        return this->getKernel(kernel_name);
+        auto kernel = std::make_unique<CachedKernel<FuncType>>(
+            kernel_name, source_variable, source_name, options
+        );
+        auto* ptr = kernel.get();
+        kernel_cache_[kernel_name] = std::move(kernel);
+        return ptr;
+    }
+
+    /// Create or retrieve a kernel from source file. source_name is derived
+    /// from the basename of source_path. If the kernel already exists in the
+    /// cache, returns the cached instance.
+    template <typename FuncType>
+    CachedKernel<FuncType>* createFromFile(
+        const std::string& kernel_name,
+        const std::string& source_path
+    ) {
+        static_assert(std::is_function_v<FuncType>, "FuncType must be a function type (e.g. void(float*, int))");
+        std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
+        auto it = kernel_cache_.find(kernel_name);
+        if (it != kernel_cache_.end()) {
+            auto* ptr = dynamic_cast<CachedKernel<FuncType>*>(it->second.get());
+            if (!ptr) {
+                throw std::runtime_error(
+                    "Kernel type mismatch for '" + kernel_name + "': requested type does not "
+                    "match the type used at creation"
+                );
+            }
+            return ptr;
+        }
+
+        std::ifstream file(source_path);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open file: " + source_path);
+        }
+        std::ostringstream ss;
+        ss << file.rdbuf();
+        std::string kernel_code = ss.str();
+
+        auto source_name = std::filesystem::path(source_path).filename().string();
+
+        auto kernel = std::make_unique<CachedKernel<FuncType>>(
+            kernel_name, kernel_code, source_name, std::vector<std::string>{}
+        );
+        auto* ptr = kernel.get();
+        kernel_cache_[kernel_name] = std::move(kernel);
+        return ptr;
     }
 
   private:
     KernelFactory() {}
-    std::unordered_map<std::string, std::unique_ptr<CachedKernel>> kernel_cache_;
+    std::unordered_map<std::string, std::unique_ptr<CachedKernelBase>> kernel_cache_;
 
     static std::mutex kernel_cache_mutex_;
 };
