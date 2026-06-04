@@ -127,8 +127,11 @@ extern "C" __global__ void matrix_multiply(float* A, float* B, float* C, int N) 
         auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
         std::cout << "Compiling kernel..." << std::endl;
 
+        // Kernel declaration matching the source passed to NVRTC
+        __global__ void matrix_multiply(float* A, float* B, float* C, int N);
+
         auto compile_start = std::chrono::high_resolution_clock::now();
-        auto* kernel = factory.create(
+        auto* kernel = factory.create<decltype(matrix_multiply)>(
             "matrix_multiply",                      // kernel name
             kernel_source,                          // kernel source code
             "matrix_multiply.cu",                   // virtual source filename
@@ -141,19 +144,18 @@ extern "C" __global__ void matrix_multiply(float* A, float* B, float* C, int N) 
 
         // Launch configuration - using 16x16 thread blocks to match TILE_SIZE
         const int TILE_SIZE = 16;
-        dim3 blockSize(TILE_SIZE, TILE_SIZE);
-        dim3 gridSize((N + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
 
-        std::cout << "Launching kernel with " << gridSize.x << "x" << gridSize.y
-                  << " blocks of " << blockSize.x << "x" << blockSize.y << " threads" << std::endl;
+        auto config = gpulite::LaunchConfig();
+        config.gridDim = dim3((N + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
+        config.blockDim = dim3(TILE_SIZE, TILE_SIZE);
 
-        // Prepare kernel arguments
-        std::vector<void*> args = {&d_a, &d_b, &d_c, const_cast<void*>(static_cast<const void*>(&N))};
+        std::cout << "Launching kernel with " << config.gridDim.x << "x" << config.gridDim.y
+                  << " blocks of " << config.blockDim.x << "x" << config.blockDim.y << " threads" << std::endl;
 
         // Warmup runs
         std::cout << "Performing warmup runs..." << std::endl;
         for (int i = 0; i < 5; i++) {
-            kernel->launch(gridSize, blockSize, 0, nullptr, args, true);
+            kernel->launch(config, d_a, d_b, d_c, N);
         }
 
         // Cooldown period
@@ -167,7 +169,7 @@ extern "C" __global__ void matrix_multiply(float* A, float* B, float* C, int N) 
 
         for (int run = 0; run < num_runs; run++) {
             auto gpu_start = std::chrono::high_resolution_clock::now();
-            kernel->launch(gridSize, blockSize, 0, nullptr, args, true);
+            kernel->launch(config, d_a, d_b, d_c, N);
             auto gpu_end = std::chrono::high_resolution_clock::now();
 
             auto gpu_time = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);

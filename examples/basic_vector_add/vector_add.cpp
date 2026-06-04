@@ -61,8 +61,11 @@ extern "C" __global__ void vector_add(float* a, float* b, float* c, int n) {
         auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
         std::cout << "Compiling kernel..." << std::endl;
 
+        // Kernel declaration matching the source passed to NVRTC
+        __global__ void vector_add(float* a, float* b, float* c, int n);
+
         auto start = std::chrono::high_resolution_clock::now();
-        auto* kernel = factory.create(
+        auto* kernel = factory.create<decltype(vector_add)>(
             "vector_add",           // kernel name
             kernel_source,          // kernel source code
             "vector_add.cu",        // virtual source filename
@@ -77,15 +80,16 @@ extern "C" __global__ void vector_add(float* a, float* b, float* c, int n) {
         int threadsPerBlock = 256;
         int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 
-        std::cout << "Launching kernel with " << blocksPerGrid << " blocks of " << threadsPerBlock << " threads" << std::endl;
+        auto config = gpulite::LaunchConfig();
+        config.gridDim = dim3(blocksPerGrid);
+        config.blockDim = dim3(threadsPerBlock);
 
-        // Prepare kernel arguments
-        std::vector<void*> args = {&d_a, &d_b, &d_c, const_cast<void*>(static_cast<const void*>(&N))};
+        std::cout << "Launching kernel with " << config.gridDim.x << " blocks of " << config.blockDim.x << " threads" << std::endl;
 
         // Warmup runs
         std::cout << "Performing warmup runs..." << std::endl;
         for (int i = 0; i < 5; i++) {
-            kernel->launch(dim3(blocksPerGrid), dim3(threadsPerBlock), 0, nullptr, args, true);
+            kernel->launch(config, d_a, d_b, d_c, N);
         }
 
         // Cooldown period
@@ -99,14 +103,7 @@ extern "C" __global__ void vector_add(float* a, float* b, float* c, int n) {
 
         for (int run = 0; run < num_runs; run++) {
             start = std::chrono::high_resolution_clock::now();
-            kernel->launch(
-                dim3(blocksPerGrid),    // grid size
-                dim3(threadsPerBlock),  // block size
-                0,                      // shared memory size
-                nullptr,                // stream (default)
-                args,                   // kernel arguments
-                true                    // synchronize after launch
-            );
+            kernel->launch(config, d_a, d_b, d_c, N);
             end = std::chrono::high_resolution_clock::now();
 
             auto kernel_time = std::chrono::duration_cast<std::chrono::microseconds>(end - start);

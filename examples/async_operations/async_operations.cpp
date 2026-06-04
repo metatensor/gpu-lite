@@ -66,7 +66,11 @@ int main() {
         // Compile kernel
         auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
         std::cout << "\nCompiling kernel..." << std::endl;
-        auto* kernel = factory.create(
+
+        // Kernel declaration matching the source passed to NVRTC
+        __global__ void scale_array(float* data, float scale, int n);
+
+        auto* kernel = factory.create<decltype(scale_array)>(
             "scale_array",
             kernel_source,
             "async_kernel.cu",
@@ -77,6 +81,10 @@ int main() {
         // Launch configuration
         int threadsPerBlock = 256;
         int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+
+        auto config = gpulite::LaunchConfig();
+        config.gridDim = dim3(blocksPerGrid);
+        config.blockDim = dim3(threadsPerBlock);
 
         // ========================================
         // Synchronous execution (baseline)
@@ -92,8 +100,7 @@ int main() {
             GPULITE_CUDART_CALL(cudaMemcpy(d_data[0], h_chunk, chunk_bytes, cudaMemcpyHostToDevice));
 
             // Execute kernel
-            std::vector<void*> args = {&d_data[0], const_cast<float*>(&scale), const_cast<int*>(&N)};
-            kernel->launch(dim3(blocksPerGrid), dim3(threadsPerBlock), 0, nullptr, args, true);
+            kernel->launch(config, d_data[0], scale, N);
 
             // Copy back (blocking)
             GPULITE_CUDART_CALL(cudaMemcpy(h_chunk, d_data[0], chunk_bytes, cudaMemcpyDeviceToHost));
@@ -127,11 +134,7 @@ int main() {
             ));
 
             // Execute kernel on stream
-            std::vector<void*> args = {&d_data[buf], const_cast<float*>(&scale), const_cast<int*>(&N)};
-            kernel->launch(
-                dim3(blocksPerGrid), dim3(threadsPerBlock), 0,
-                reinterpret_cast<void*>(stream), args, false
-            );
+            kernel->launch(config, d_data[buf], scale, N);
 
             // Async copy back
             GPULITE_CUDART_CALL(cudaMemcpyAsync(

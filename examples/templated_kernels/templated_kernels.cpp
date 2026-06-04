@@ -71,8 +71,11 @@ __global__ void process_array(T* input, T* output, int n) {
         auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
         std::cout << "Compiling kernel: " << kernel_name << std::endl;
 
+        // Kernel declaration matching the source passed to NVRTC
+        __global__ void process_array(T* input, T* output, int n);
+
         auto compile_start = std::chrono::high_resolution_clock::now();
-        auto* kernel = factory.create(
+        auto* kernel = factory.create<decltype(process_array)>(
             kernel_name,                           // templated kernel name
             kernel_source,                         // kernel source code
             "templated_kernel.cu",                 // virtual source filename
@@ -87,13 +90,14 @@ __global__ void process_array(T* input, T* output, int n) {
         int threadsPerBlock = 256;
         int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 
-        // Prepare kernel arguments
-        std::vector<void*> args = {&d_input, &d_output, const_cast<void*>(static_cast<const void*>(&N))};
+        auto config = gpulite::LaunchConfig();
+        config.gridDim = dim3(blocksPerGrid);
+        config.blockDim = dim3(threadsPerBlock);
 
         // Warmup runs
         std::cout << "Performing warmup runs..." << std::endl;
         for (int i = 0; i < 5; i++) {
-            kernel->launch(dim3(blocksPerGrid), dim3(threadsPerBlock), 0, nullptr, args, true);
+            kernel->launch(config, d_input, d_output, N);
         }
 
         // Cooldown period
@@ -107,14 +111,7 @@ __global__ void process_array(T* input, T* output, int n) {
 
         for (int run = 0; run < num_runs; run++) {
             auto kernel_start = std::chrono::high_resolution_clock::now();
-            kernel->launch(
-                dim3(blocksPerGrid),
-                dim3(threadsPerBlock),
-                0,
-                nullptr,
-                args,
-                true
-            );
+            kernel->launch(config, d_input, d_output, N);
             auto kernel_end = std::chrono::high_resolution_clock::now();
 
             auto kernel_time = std::chrono::duration_cast<std::chrono::microseconds>(kernel_end - kernel_start);
