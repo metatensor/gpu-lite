@@ -1,5 +1,4 @@
-// gpu-lite - Combined Header
-// A lightweight C++ library for dynamic CUDA runtime compilation and kernel caching
+// gpulite: a lightweight C++ library for dynamic CUDA runtime compilation
 #ifndef GPULITE_HPP
 #define GPULITE_HPP
 
@@ -29,11 +28,15 @@
     #include <dlfcn.h>
     #include <unistd.h>  // for getcwd
 #elif defined(_WIN32)
+    #define WIN32_LEAN_AND_MEAN
+    #define NOMINMAX
     #include <windows.h>
     #include <libloaderapi.h>
     #include <psapi.h>
     #include <direct.h>  // for _getcwd
     #define getcwd _getcwd
+
+    #include <optional>
 #else
     #error "Platform not supported"
 #endif
