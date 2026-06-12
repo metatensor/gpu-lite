@@ -1,11 +1,11 @@
-// gpu-lite - Combined Header
-// A lightweight C++ library for dynamic CUDA runtime compilation and kernel caching
+// gpulite: a lightweight C++ library for dynamic CUDA runtime compilation
 #ifndef GPULITE_HPP
 #define GPULITE_HPP
 
 #include <cstddef>
 #include <cstring>
 
+#include <atomic>
 #include <list>
 #include <mutex>
 #include <tuple>
@@ -13,7 +13,6 @@
 #include <string>
 #include <vector>
 #include <fstream>
-#include <sstream>
 #include <algorithm>
 #include <stdexcept>
 #include <filesystem>
@@ -29,11 +28,15 @@
     #include <dlfcn.h>
     #include <unistd.h>  // for getcwd
 #elif defined(_WIN32)
+    #define WIN32_LEAN_AND_MEAN
+    #define NOMINMAX
     #include <windows.h>
     #include <libloaderapi.h>
     #include <psapi.h>
     #include <direct.h>  // for _getcwd
     #define getcwd _getcwd
+
+    #include <optional>
 #else
     #error "Platform not supported"
 #endif
@@ -1186,45 +1189,86 @@ struct LaunchConfig {
 /// compiled kernels as well as automatically resizing dynamic shared memory
 /// allocations, when needed. Kernels are compiled on first launch.
 class CachedKernelBase {
-  public:
+public:
     CachedKernelBase(
-        std::string kernel_name,
-        std::string code,
-        std::string path,
+        const std::string& kernel_name,
+        const std::string& code,
+        const std::string& path,
         std::vector<std::string> options
-    ) {
-        this->kernel_name = kernel_name;
-        this->code = code;
-        this->path = path;
-        this->options = options;
+    ): CachedKernelBase(kernel_name, code.c_str(), path.c_str(), std::move(options)) {}
+
+    CachedKernelBase(
+        const std::string& kernel_name,
+        const char* code,
+        const char* path,
+        std::vector<std::string> options
+    ): kernel_name_(kernel_name), options_(std::move(options)) {
+        // Check if debug option is enabled
+        this->debug_ = std::any_of(
+            this->options_.cbegin(), this->options_.cend(),
+            [](const std::string& opt) {
+                return opt == "-G" || opt == "--device-debug";
+            }
+        );
+
+        // When debugging, write source to a real file so cuda-gdb can find it
+        std::string effective_source_name = path ? path : (this->kernel_name_ + std::string(".cu"));
+        if (this->debug_) {
+            // Create a debug source file in the current working directory
+            // Use absolute path so cuda-gdb can reliably find it
+            char cwd[4096];
+            if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+                effective_source_name = std::string(cwd) + "/" + effective_source_name;
+            }
+
+            std::ofstream debug_source_file(effective_source_name);
+            if (debug_source_file.is_open()) {
+                debug_source_file << code;
+                debug_source_file.close();
+            } else {
+                throw std::runtime_error(
+                    "Failed to write debug source file: " + effective_source_name
+                );
+            }
+        }
+
+        GPULITE_NVRTC_CALL(nvrtcCreateProgram(
+            &this->program_, code, effective_source_name.c_str(), 0, nullptr, nullptr
+        ));
+
+        GPULITE_NVRTC_CALL(nvrtcAddNameExpression(this->program_, this->kernel_name_.c_str()));
     }
 
-    CachedKernelBase() = default;
+    virtual ~CachedKernelBase() {
+        if (this->program_) {
+            NVRTC::instance().nvrtcDestroyProgram(&this->program_);
+        }
+    }
 
-    virtual ~CachedKernelBase() = default;
-
-    // Copy constructor
-    CachedKernelBase(const CachedKernelBase&) = default;
-
-    // Copy assignment operator
-    CachedKernelBase& operator=(const CachedKernelBase&) = default;
+    CachedKernelBase(const CachedKernelBase&) = delete;
+    CachedKernelBase& operator=(const CachedKernelBase&) = delete;
+    CachedKernelBase(CachedKernelBase&&) = delete;
+    CachedKernelBase& operator=(CachedKernelBase&&) = delete;
 
     inline void setFuncAttribute(CUfunction_attribute attribute, int value) const {
-        GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(function, attribute, value));
+        GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(function_, attribute, value));
     }
 
     int getFuncAttribute(CUfunction_attribute attribute) const {
         int value;
-        GPULITE_CUDA_DRIVER_CALL(cuFuncGetAttribute(&value, attribute, function));
+        GPULITE_CUDA_DRIVER_CALL(cuFuncGetAttribute(&value, attribute, function_));
         return value;
     }
 
-  protected:
+protected:
     /// Internal launch with void* args. Used by CachedKernel<FuncType>::launch.
     void launchRaw(const LaunchConfig& config, std::vector<void*> args) {
 
-        if (!compiled) {
-            this->compileKernel(args);
+        if (!compiled_.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> lock(compile_mutex_);
+            if (!compiled_.load(std::memory_order_relaxed)) {
+                this->compileKernel(args);
+            }
         }
 
         CUcontext currentContext = nullptr;
@@ -1234,14 +1278,14 @@ class CachedKernelBase {
             throw std::runtime_error("CachedKernelBase::launch error getting current context.");
         }
 
-        if (currentContext != context) {
-            GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(context));
+        if (currentContext != context_) {
+            GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(context_));
         }
 
         this->checkAndAdjustSharedMem(config.dynamicSmemBytes);
 
          GPULITE_CUDA_DRIVER_CALL(cuLaunchKernel(
-            function,
+            function_,
             config.gridDim.x,
             config.gridDim.y,
             config.gridDim.z,
@@ -1254,23 +1298,23 @@ class CachedKernelBase {
             nullptr
         ));
 
-        if (currentContext != context) {
+        if (currentContext != context_) {
             GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(currentContext));
         }
     }
 
-  private:
+private:
     /// The default shared memory space on most recent NVIDIA cards is 49152
     /// bytes. This method attempts to adjust the shared memory to fit the
     /// requested configuration if the kernel launch parameters exceeds the
     /// default 49152 bytes.
     void checkAndAdjustSharedMem(int query_shared_mem_size) {
-        if (current_smem_size == 0) {
+        if (current_smem_size_ == 0) {
             CUdevice cuDevice;
             GPULITE_CUDA_DRIVER_CALL(cuCtxGetDevice(&cuDevice));
 
             GPULITE_CUDA_DRIVER_CALL(cuDeviceGetAttribute(
-                &max_smem_size_optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, cuDevice
+                &max_smem_size_optin_, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, cuDevice
             ));
 
             int reserved_smem_per_block = 0;
@@ -1285,20 +1329,20 @@ class CachedKernelBase {
                 &curr_max_smem_per_block, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, cuDevice
             ));
 
-            current_smem_size = (curr_max_smem_per_block - reserved_smem_per_block);
+            current_smem_size_ = (curr_max_smem_per_block - reserved_smem_per_block);
         }
 
-        if (query_shared_mem_size > current_smem_size) {
+        if (query_shared_mem_size > current_smem_size_) {
 
-            if (query_shared_mem_size > max_smem_size_optin) {
+            if (query_shared_mem_size > max_smem_size_optin_) {
                 throw std::runtime_error(
                     "CachedKernelBase::launch requested more smem than available on card."
                 );
             } else {
                 GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(
-                    function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, query_shared_mem_size
+                    function_, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, query_shared_mem_size
                 ));
-                current_smem_size = query_shared_mem_size;
+                current_smem_size_ = query_shared_mem_size;
             }
         }
     }
@@ -1342,46 +1386,9 @@ class CachedKernelBase {
         CUdevice cuDevice;
         GPULITE_CUDA_DRIVER_CALL(cuCtxGetDevice(&cuDevice));
 
-        // Check if debug option is enabled
-        const bool enableDebug = std::any_of(
-            this->options.cbegin(), this->options.cend(),
-            [](const std::string& opt) {
-                return opt == "-G" || opt == "--device-debug";
-            }
-        );
-
-        // When debugging, write source to a real file so cuda-gdb can find it
-        std::string effective_source_name = this->path;
-        if (enableDebug) {
-            // Create a debug source file in the current working directory
-            // Use absolute path so cuda-gdb can reliably find it
-            char cwd[4096];
-            if (getcwd(cwd, sizeof(cwd)) != nullptr) {
-                effective_source_name = std::string(cwd) + "/" + this->path;
-            }
-
-            std::ofstream debug_source_file(effective_source_name);
-            if (debug_source_file.is_open()) {
-                debug_source_file << this->code;
-                debug_source_file.close();
-            } else {
-                throw std::runtime_error(
-                    "Failed to write debug source file: " + effective_source_name
-                );
-            }
-        }
-
-        nvrtcProgram prog;
-
-        GPULITE_NVRTC_CALL(nvrtcCreateProgram(
-            &prog, this->code.c_str(), effective_source_name.c_str(), 0, nullptr, nullptr
-        ));
-
-        GPULITE_NVRTC_CALL(nvrtcAddNameExpression(prog, this->kernel_name.c_str()));
-
         std::vector<const char*> c_options;
-        c_options.reserve(this->options.size());
-        for (const auto& option : this->options) {
+        c_options.reserve(this->options_.size());
+        for (const auto& option : this->options_) {
             c_options.push_back(option.c_str());
         }
 
@@ -1398,12 +1405,12 @@ class CachedKernelBase {
 
         c_options.push_back(smbuf.c_str());
 
-        nvrtcResult compileResult = NVRTC::instance().nvrtcCompileProgram(prog, c_options.size(), c_options.data());
+        nvrtcResult compileResult = NVRTC::instance().nvrtcCompileProgram(this->program_, c_options.size(), c_options.data());
         if (compileResult != NVRTC_SUCCESS) {
             size_t logSize;
-            GPULITE_NVRTC_CALL(nvrtcGetProgramLogSize(prog, &logSize));
+            GPULITE_NVRTC_CALL(nvrtcGetProgramLogSize(this->program_, &logSize));
             std::string log(logSize, '\0');
-            GPULITE_NVRTC_CALL(nvrtcGetProgramLog(prog, &log[0]));
+            GPULITE_NVRTC_CALL(nvrtcGetProgramLog(this->program_, &log[0]));
             throw std::runtime_error(
                 "KernelFactory::compileAndCacheKernel: Failed to compile CUDA program:\n" + log
             );
@@ -1411,15 +1418,15 @@ class CachedKernelBase {
 
         // fetch CUBIN
         size_t cubinSize = 0;
-        GPULITE_NVRTC_CALL(nvrtcGetCUBINSize(prog, &cubinSize));
+        GPULITE_NVRTC_CALL(nvrtcGetCUBINSize(this->program_, &cubinSize));
         std::vector<char> cubin(cubinSize);
-        GPULITE_NVRTC_CALL(nvrtcGetCUBIN(prog, cubin.data()));
+        GPULITE_NVRTC_CALL(nvrtcGetCUBIN(this->program_, cubin.data()));
 
         // load the module from cubin
         CUmodule module = nullptr;
         CUresult cuResult;
 
-        if (enableDebug) {
+        if (this->debug_) {
             // Load with JIT debug info
             CUjit_option opts[1];
             opts[0] = CU_JIT_GENERATE_DEBUG_INFO;
@@ -1446,16 +1453,17 @@ class CachedKernelBase {
         }
 
         const char* lowered_name;
-        GPULITE_NVRTC_CALL(nvrtcGetLoweredName(prog, this->kernel_name.c_str(), &lowered_name));
+        GPULITE_NVRTC_CALL(nvrtcGetLoweredName(this->program_, this->kernel_name_.c_str(), &lowered_name));
         CUfunction kernel;
         GPULITE_CUDA_DRIVER_CALL(cuModuleGetFunction(&kernel, module, lowered_name));
 
-        this->module = module;
-        this->function = kernel;
-        this->context = currentContext;
-        this->compiled = true;
+        this->module_ = module;
+        this->function_ = kernel;
+        this->context_ = currentContext;
+        this->compiled_.store(true, std::memory_order_release);
 
-        GPULITE_NVRTC_CALL(nvrtcDestroyProgram(&prog));
+        GPULITE_NVRTC_CALL(nvrtcDestroyProgram(&this->program_));
+        this->program_ = nullptr;
     }
 
     void initCudaDriver() {
@@ -1474,17 +1482,19 @@ class CachedKernelBase {
         }
     }
 
-    int current_smem_size = 0;
-    int max_smem_size_optin = 0;
-    CUmodule module = nullptr;
-    CUfunction function = nullptr;
-    CUcontext context = nullptr;
-    bool compiled = false;
+    std::string kernel_name_;
 
-    std::string kernel_name;
-    std::string code;
-    std::string path;
-    std::vector<std::string> options;
+    int current_smem_size_ = 0;
+    int max_smem_size_optin_ = 0;
+    CUmodule module_ = nullptr;
+    CUfunction function_ = nullptr;
+    CUcontext context_ = nullptr;
+    nvrtcProgram program_ = nullptr;
+    std::atomic<bool> compiled_{false};
+    bool debug_ = false;
+
+    std::mutex compile_mutex_;
+    std::vector<std::string> options_;
 };
 
 
@@ -1500,7 +1510,7 @@ class CachedKernel : public CachedKernelBase {
     static_assert(std::is_function_v<FuncType>,
                   "CachedKernel requires a function type (e.g. void(float*, int))");
 
-  public:
+public:
     using CachedKernelBase::CachedKernelBase;
 
     /// Launch the kernel with typed arguments. Options like grid/block/sync
@@ -1567,15 +1577,25 @@ class KernelFactory {
         throw std::runtime_error("Kernel not found in cache: " + kernel_name);
     }
 
+    template <typename FuncType>
+    CachedKernel<FuncType>* create(
+        const std::string& kernel_name,
+        const std::string& code,
+        const std::string& path,
+        std::vector<std::string> options
+    ) {
+        return this->create<FuncType>(kernel_name, code.c_str(), path.c_str(), std::move(options));
+    }
+
     /// Create or retrieve a kernel from inline source. If the kernel already
     /// exists in the cache, returns the cached instance. FuncType is the
     /// function signature of the kernel (e.g. void(float*, float*, int)).
     template <typename FuncType>
     CachedKernel<FuncType>* create(
         const std::string& kernel_name,
-        const std::string& source_variable,
-        const std::string& source_name,
-        const std::vector<std::string>& options
+        const char* code,
+        const char* path,
+        std::vector<std::string> options
     ) {
         static_assert(std::is_function_v<FuncType>, "FuncType must be a function type (e.g. void(float*, int))");
         std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
@@ -1592,47 +1612,7 @@ class KernelFactory {
         }
 
         auto kernel = std::make_unique<CachedKernel<FuncType>>(
-            kernel_name, source_variable, source_name, options
-        );
-        auto* ptr = kernel.get();
-        kernel_cache_[kernel_name] = std::move(kernel);
-        return ptr;
-    }
-
-    /// Create or retrieve a kernel from source file. source_name is derived
-    /// from the basename of source_path. If the kernel already exists in the
-    /// cache, returns the cached instance.
-    template <typename FuncType>
-    CachedKernel<FuncType>* createFromFile(
-        const std::string& kernel_name,
-        const std::string& source_path
-    ) {
-        static_assert(std::is_function_v<FuncType>, "FuncType must be a function type (e.g. void(float*, int))");
-        std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
-        auto it = kernel_cache_.find(kernel_name);
-        if (it != kernel_cache_.end()) {
-            auto* ptr = dynamic_cast<CachedKernel<FuncType>*>(it->second.get());
-            if (!ptr) {
-                throw std::runtime_error(
-                    "Kernel type mismatch for '" + kernel_name + "': requested type does not "
-                    "match the type used at creation"
-                );
-            }
-            return ptr;
-        }
-
-        std::ifstream file(source_path);
-        if (!file.is_open()) {
-            throw std::runtime_error("Failed to open file: " + source_path);
-        }
-        std::ostringstream ss;
-        ss << file.rdbuf();
-        std::string kernel_code = ss.str();
-
-        auto source_name = std::filesystem::path(source_path).filename().string();
-
-        auto kernel = std::make_unique<CachedKernel<FuncType>>(
-            kernel_name, kernel_code, source_name, std::vector<std::string>{}
+            kernel_name, code, path, std::move(options)
         );
         auto* ptr = kernel.get();
         kernel_cache_[kernel_name] = std::move(kernel);
