@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include <array>
 #include <atomic>
 #include <list>
 #include <mutex>
@@ -1262,12 +1263,14 @@ public:
 
 protected:
     /// Internal launch with void* args. Used by CachedKernel<FuncType>::launch.
-    void launchRaw(const LaunchConfig& config, std::vector<void*> args) {
+    /// `args` points to `n_args` kernel argument pointers, owned by the caller
+    /// (typically a stack array) for the duration of this call.
+    void launchRaw(const LaunchConfig& config, void* const* args, size_t n_args) {
 
         if (!compiled_.load(std::memory_order_acquire)) {
             std::lock_guard<std::mutex> lock(compile_mutex_);
             if (!compiled_.load(std::memory_order_relaxed)) {
-                this->compileKernel(args);
+                this->compileKernel(args, n_args);
             }
         }
 
@@ -1294,7 +1297,7 @@ protected:
             config.blockDim.z,
             config.dynamicSmemBytes,
             config.stream,
-            args.data(),
+            const_cast<void**>(args),
             nullptr
         ));
 
@@ -1352,12 +1355,12 @@ private:
     /// auto-detect the compute capability of the available card. args for the
     /// launch need to be queried as we need to grab the CUcontext in which
     /// these ptrs exist.
-    void compileKernel(std::vector<void*>& kernel_args) {
+    void compileKernel(void* const* kernel_args, size_t n_args) {
         this->initCudaDriver();
 
         CUcontext currentContext = nullptr;
 
-        for (size_t ptr_id = 0; ptr_id < kernel_args.size(); ptr_id++) {
+        for (size_t ptr_id = 0; ptr_id < n_args; ptr_id++) {
             unsigned int memtype = 0;
             CUdeviceptr device_ptr = *reinterpret_cast<CUdeviceptr*>(kernel_args[ptr_id]);
 
@@ -1519,8 +1522,10 @@ public:
     void launch(const LaunchConfig& config, Ts... args) {
         details::check_tuple_arguments<FuncType, Ts...>();
 
-        std::vector<void*> kernel_args = { static_cast<void*>(&args)... };
-        launchRaw(config, std::move(kernel_args));
+        // Stack-allocated (size known at compile time from the parameter
+        // pack), avoiding a heap allocation on every kernel launch.
+        std::array<void*, sizeof...(Ts)> kernel_args = { static_cast<void*>(&args)... };
+        launchRaw(config, kernel_args.data(), kernel_args.size());
     }
 };
 
