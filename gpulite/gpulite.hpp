@@ -3,6 +3,7 @@
 #define GPULITE_HPP
 
 #include <cstddef>
+#include <cassert>
 #include <cstring>
 
 #include <array>
@@ -29,8 +30,14 @@
     #include <dlfcn.h>
     #include <unistd.h>  // for getcwd
 #elif defined(_WIN32)
+    #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
+    #endif
+
+    #ifndef NOMINMAX
     #define NOMINMAX
+    #endif
+
     #include <windows.h>
     #include <libloaderapi.h>
     #include <psapi.h>
