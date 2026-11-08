@@ -1623,7 +1623,13 @@ class KernelFactory {
     /// Get the singleton instance of the KernelFactory for a given CUDA device.
     /// This ensures that each CUDA device has its own kernel cache.
     static KernelFactory& instance(CUdevice device) {
+        static std::mutex INSTANCES_MUTEX;
         static std::list<KernelFactory> INSTANCES;
+
+        // Different threads can ask for different devices at the same time.
+        // References to elements of a std::list stay valid when it grows, so
+        // the lock is only needed while looking up/adding elements.
+        std::lock_guard<std::mutex> lock(INSTANCES_MUTEX);
         for (int i = INSTANCES.size(); i < device + 1; i++) {
             INSTANCES.emplace_back(KernelFactory());
         }
