@@ -76,6 +76,7 @@ typedef struct CUctx_st* CUcontext;
 typedef struct CUmod_st* CUmodule;
 typedef struct CUfunc_st* CUfunction;
 typedef struct CUstream_st* CUstream;
+typedef struct CUevent_st* CUevent;
 typedef size_t CUdeviceptr;
 
 typedef enum cudaError_enum {
@@ -211,12 +212,15 @@ enum cudaError {
     cudaErrorMemoryAllocation = 2,
     cudaErrorInitializationError = 3,
     // [...]
+    cudaErrorNotReady = 600,
+    // [...]
     cudaErrorUnknown = 999,
     cudaErrorApiFailureBase = 10000
 };
 
 typedef enum cudaError cudaError_t;
 typedef struct CUstream_st* cudaStream_t;
+typedef struct CUevent_st* cudaEvent_t;
 
 enum cudaMemcpyKind {
     cudaMemcpyHostToHost = 0,
@@ -245,6 +249,14 @@ struct cudaPointerAttributes {
 #define cudaHostAllocPortable               0x01
 #define cudaHostAllocMapped                 0x02
 #define cudaHostAllocWriteCombined          0x04
+
+#define cudaEventDefault                    0x00
+#define cudaEventBlockingSync               0x01
+#define cudaEventDisableTiming              0x02
+#define cudaEventInterprocess               0x04
+
+#define cudaEventWaitDefault                0x00
+#define cudaEventWaitExternal               0x01
 
 // allow including `.cuh` files in the CPU code
 #if !defined(__CUDACC__) && !defined(__global__)
@@ -730,6 +742,17 @@ class CUDART {
     using cudaFreeHost_t = cudaError_t (*)(void*);
     using cudaHostGetDevicePointer_t = cudaError_t (*)(void**, void*, unsigned int);
     using cudaMemcpyAsync_t = cudaError_t (*)(void*, const void*, size_t, cudaMemcpyKind, cudaStream_t);
+    using cudaMemsetAsync_t = cudaError_t (*)(void*, int, size_t, cudaStream_t);
+    using cudaMallocAsync_t = cudaError_t (*)(void**, size_t, cudaStream_t);
+    using cudaFreeAsync_t = cudaError_t (*)(void*, cudaStream_t);
+    using cudaEventCreate_t = cudaError_t (*)(cudaEvent_t*);
+    using cudaEventCreateWithFlags_t = cudaError_t (*)(cudaEvent_t*, unsigned int);
+    using cudaEventDestroy_t = cudaError_t (*)(cudaEvent_t);
+    using cudaEventRecord_t = cudaError_t (*)(cudaEvent_t, cudaStream_t);
+    using cudaEventSynchronize_t = cudaError_t (*)(cudaEvent_t);
+    using cudaEventQuery_t = cudaError_t (*)(cudaEvent_t);
+    using cudaEventElapsedTime_t = cudaError_t (*)(float*, cudaEvent_t, cudaEvent_t);
+    using cudaStreamWaitEvent_t = cudaError_t (*)(cudaStream_t, cudaEvent_t, unsigned int);
 
     cudaGetDeviceCount_t cudaGetDeviceCount;
     cudaGetDevice_t cudaGetDevice;
@@ -750,6 +773,17 @@ class CUDART {
     cudaFreeHost_t cudaFreeHost;
     cudaHostGetDevicePointer_t cudaHostGetDevicePointer;
     cudaMemcpyAsync_t cudaMemcpyAsync;
+    cudaMemsetAsync_t cudaMemsetAsync;
+    cudaMallocAsync_t cudaMallocAsync;
+    cudaFreeAsync_t cudaFreeAsync;
+    cudaEventCreate_t cudaEventCreate;
+    cudaEventCreateWithFlags_t cudaEventCreateWithFlags;
+    cudaEventDestroy_t cudaEventDestroy;
+    cudaEventRecord_t cudaEventRecord;
+    cudaEventSynchronize_t cudaEventSynchronize;
+    cudaEventQuery_t cudaEventQuery;
+    cudaEventElapsedTime_t cudaEventElapsedTime;
+    cudaStreamWaitEvent_t cudaStreamWaitEvent;
 
     CUDART() {
 #if defined(__linux__) || defined(__APPLE__)
@@ -827,6 +861,17 @@ class CUDART {
             cudaFreeHost = details::loadSymbol<cudaFreeHost_t>(cudartHandle, "cudaFreeHost");
             cudaHostGetDevicePointer = details::loadSymbol<cudaHostGetDevicePointer_t>(cudartHandle, "cudaHostGetDevicePointer");
             cudaMemcpyAsync = details::loadSymbol<cudaMemcpyAsync_t>(cudartHandle, "cudaMemcpyAsync");
+            cudaMemsetAsync = details::loadSymbol<cudaMemsetAsync_t>(cudartHandle, "cudaMemsetAsync");
+            cudaMallocAsync = details::loadSymbol<cudaMallocAsync_t>(cudartHandle, "cudaMallocAsync");
+            cudaFreeAsync = details::loadSymbol<cudaFreeAsync_t>(cudartHandle, "cudaFreeAsync");
+            cudaEventCreate = details::loadSymbol<cudaEventCreate_t>(cudartHandle, "cudaEventCreate");
+            cudaEventCreateWithFlags = details::loadSymbol<cudaEventCreateWithFlags_t>(cudartHandle, "cudaEventCreateWithFlags");
+            cudaEventDestroy = details::loadSymbol<cudaEventDestroy_t>(cudartHandle, "cudaEventDestroy");
+            cudaEventRecord = details::loadSymbol<cudaEventRecord_t>(cudartHandle, "cudaEventRecord");
+            cudaEventSynchronize = details::loadSymbol<cudaEventSynchronize_t>(cudartHandle, "cudaEventSynchronize");
+            cudaEventQuery = details::loadSymbol<cudaEventQuery_t>(cudartHandle, "cudaEventQuery");
+            cudaEventElapsedTime = details::loadSymbol<cudaEventElapsedTime_t>(cudartHandle, "cudaEventElapsedTime");
+            cudaStreamWaitEvent = details::loadSymbol<cudaStreamWaitEvent_t>(cudartHandle, "cudaStreamWaitEvent");
         }
     }
 
@@ -882,13 +927,22 @@ class CUDADriver {
     using cuCtxGetDevice_t = CUresult (*)(CUdevice*);
     using cuDeviceGetAttribute_t = CUresult (*)(int*, CUdevice_attribute, CUdevice);
     using cuDeviceGetName_t = CUresult (*)(char*, int, CUdevice);
-    using cuDeviceTotalMem_t = CUresult (*)(size_t*, CUdevice);
+    using cuDeviceTotalMem_t = CUresult (*)(unsigned int*, CUdevice);
     using cuStreamCreate_t = CUresult (*)(CUstream*, unsigned int);
     using cuStreamDestroy_t = CUresult (*)(CUstream);
     using cuCtxSynchronize_t = CUresult (*)(void);
     using cuGetErrorName_t = CUresult (*)(CUresult, const char**);
     using cuCtxPushCurrent_t = CUresult (*)(CUcontext);
     using cuPointerGetAttribute_t = CUresult (*)(void*, CUpointer_attribute, CUdeviceptr);
+    using cuCtxCreate_v2_t = CUresult (*)(CUcontext*, unsigned int, CUdevice);
+    using cuCtxDestroy_v2_t = CUresult (*)(CUcontext);
+    using cuCtxPushCurrent_v2_t = CUresult (*)(CUcontext);
+    using cuStreamDestroy_v2_t = CUresult (*)(CUstream);
+    using cuDevicePrimaryCtxRelease_v2_t = CUresult (*)(CUdevice);
+    using cuDeviceTotalMem_v2_t = CUresult (*)(size_t*, CUdevice);
+    using cuMemsetD8Async_t = CUresult (*)(CUdeviceptr, unsigned char, size_t, CUstream);
+    using cuMemsetD16Async_t = CUresult (*)(CUdeviceptr, unsigned short, size_t, CUstream);
+    using cuMemsetD32Async_t = CUresult (*)(CUdeviceptr, unsigned int, size_t, CUstream);
     using cuLaunchKernel_t = CUresult (*)(
         CUfunction,
         unsigned int,
@@ -923,6 +977,15 @@ class CUDADriver {
     cuStreamDestroy_t cuStreamDestroy;
     cuGetErrorName_t cuGetErrorName;
     cuCtxSynchronize_t cuCtxSynchronize;
+    cuCtxCreate_v2_t cuCtxCreate_v2;
+    cuCtxDestroy_v2_t cuCtxDestroy_v2;
+    cuCtxPushCurrent_v2_t cuCtxPushCurrent_v2;
+    cuStreamDestroy_v2_t cuStreamDestroy_v2;
+    cuDevicePrimaryCtxRelease_v2_t cuDevicePrimaryCtxRelease_v2;
+    cuDeviceTotalMem_v2_t cuDeviceTotalMem_v2;
+    cuMemsetD8Async_t cuMemsetD8Async;
+    cuMemsetD16Async_t cuMemsetD16Async;
+    cuMemsetD32Async_t cuMemsetD32Async;
     cuCtxPushCurrent_t cuCtxPushCurrent;
     cuPointerGetAttribute_t cuPointerGetAttribute;
     cuLaunchKernel_t cuLaunchKernel;
@@ -973,6 +1036,15 @@ class CUDADriver {
             cuCtxPushCurrent = details::loadSymbol<cuCtxPushCurrent_t>(cudaHandle, "cuCtxPushCurrent");
             cuPointerGetAttribute = details::loadSymbol<cuPointerGetAttribute_t>(cudaHandle, "cuPointerGetAttribute");
             cuLaunchKernel = details::loadSymbol<cuLaunchKernel_t>(cudaHandle, "cuLaunchKernel");
+            cuCtxCreate_v2 = details::loadSymbol<cuCtxCreate_v2_t>(cudaHandle, "cuCtxCreate_v2");
+            cuCtxDestroy_v2 = details::loadSymbol<cuCtxDestroy_v2_t>(cudaHandle, "cuCtxDestroy_v2");
+            cuCtxPushCurrent_v2 = details::loadSymbol<cuCtxPushCurrent_v2_t>(cudaHandle, "cuCtxPushCurrent_v2");
+            cuStreamDestroy_v2 = details::loadSymbol<cuStreamDestroy_v2_t>(cudaHandle, "cuStreamDestroy_v2");
+            cuDevicePrimaryCtxRelease_v2 = details::loadSymbol<cuDevicePrimaryCtxRelease_v2_t>(cudaHandle, "cuDevicePrimaryCtxRelease_v2");
+            cuDeviceTotalMem_v2 = details::loadSymbol<cuDeviceTotalMem_v2_t>(cudaHandle, "cuDeviceTotalMem_v2");
+            cuMemsetD8Async = details::loadSymbol<cuMemsetD8Async_t>(cudaHandle, "cuMemsetD8Async");
+            cuMemsetD16Async = details::loadSymbol<cuMemsetD16Async_t>(cudaHandle, "cuMemsetD16Async");
+            cuMemsetD32Async = details::loadSymbol<cuMemsetD32Async_t>(cudaHandle, "cuMemsetD32Async");
         }
     }
 
