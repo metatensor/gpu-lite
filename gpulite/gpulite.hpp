@@ -1461,7 +1461,20 @@ private:
         CUcontext query = nullptr;
         GPULITE_CUDA_DRIVER_CALL(cuCtxGetCurrent(&query));
 
-        if (query != currentContext) {
+        if (currentContext == nullptr) {
+            // None of the arguments is tied to a context. This happens when
+            // they are all scalars, or when the device memory comes from the
+            // stream-ordered allocator (`cudaMallocAsync`) or from the virtual
+            // memory management API, which are not tied to a specific context.
+            // In this case, we use the current context.
+            if (query == nullptr) {
+                throw std::runtime_error(
+                    "CachedKernelBase::compileKernel: could not find a CUDA context "
+                    "from the kernel arguments, and there is no current CUDA context"
+                );
+            }
+            currentContext = query;
+        } else if (query != currentContext) {
             GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(currentContext));
         }
 
