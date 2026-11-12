@@ -8,18 +8,19 @@
 
 #include <array>
 #include <atomic>
-#include <list>
+#include <map>
 #include <mutex>
 #include <tuple>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <initializer_list>
 #include <vector>
 #include <fstream>
 #include <algorithm>
 #include <stdexcept>
 #include <filesystem>
 #include <type_traits>
-#include <unordered_map>
 
 
 #if defined(__linux__)
@@ -1623,38 +1624,44 @@ public:
 
 
 /// Factory class to create and store compiled cuda kernels for caching as a
-/// simple name-based hashmap. Allows both compiling from a source file, or for
+/// simple name-based map. Allows both compiling from a source file, or for
 /// compiling from a variable containing CUDA code.
+///
+/// The pointers returned by `create()` and `getKernel()` stay valid for the
+/// whole lifetime of the program, so callers that launch the same kernel many
+/// times can look it up once and keep the pointer around.
 class KernelFactory {
   public:
     KernelFactory(const KernelFactory&) = delete;
     KernelFactory& operator=(const KernelFactory&) = delete;
-
-    KernelFactory(KernelFactory&&) = default;
-    KernelFactory& operator=(KernelFactory&&) = default;
+    KernelFactory(KernelFactory&&) = delete;
+    KernelFactory& operator=(KernelFactory&&) = delete;
 
     /// Get the singleton instance of the KernelFactory for a given CUDA device.
     /// This ensures that each CUDA device has its own kernel cache.
     static KernelFactory& instance(CUdevice device) {
         static std::mutex INSTANCES_MUTEX;
-        static std::list<KernelFactory> INSTANCES;
+        static std::vector<std::unique_ptr<KernelFactory>> INSTANCES;
 
         // Different threads can ask for different devices at the same time.
-        // References to elements of a std::list stay valid when it grows, so
-        // the lock is only needed while looking up/adding elements.
-        std::lock_guard<std::mutex> lock(INSTANCES_MUTEX);
-        for (int i = INSTANCES.size(); i < device + 1; i++) {
-            INSTANCES.emplace_back(KernelFactory());
+        // The factories are allocated separately and never removed, so the
+        // references stay valid when the vector grows, and the lock is only
+        // needed while looking up/adding elements.
+        if (device < 0) {
+            throw std::runtime_error("invalid CUDA device index: " + std::to_string(device));
         }
 
-        // get the element at index "device" in the list and return it
-        auto it = INSTANCES.begin();
-        std::advance(it, device);
-        return *it;
+        std::lock_guard<std::mutex> lock(INSTANCES_MUTEX);
+        auto index = static_cast<size_t>(device);
+        while (INSTANCES.size() < index + 1) {
+            INSTANCES.push_back(std::unique_ptr<KernelFactory>(new KernelFactory()));
+        }
+
+        return *INSTANCES[index];
     }
 
     /// Check if a kernel with the given name exists in the cache.
-    bool hasKernel(const std::string& kernel_name) {
+    bool hasKernel(std::string_view kernel_name) {
         std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
         return kernel_cache_.find(kernel_name) != kernel_cache_.end();
     }
@@ -1662,32 +1669,34 @@ class KernelFactory {
     /// Retrieve a previously cached kernel. FuncType must match the type used
     /// when the kernel was created.
     template <typename FuncType>
-    CachedKernel<FuncType>* getKernel(const std::string& kernel_name) {
+    CachedKernel<FuncType>* getKernel(std::string_view kernel_name) {
         static_assert(std::is_function_v<FuncType>,
                       "FuncType must be a function type (e.g. void(float*, int))");
         std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
-        auto it = kernel_cache_.find(kernel_name);
-        if (it != kernel_cache_.end()) {
-            auto* ptr = dynamic_cast<CachedKernel<FuncType>*>(it->second.get());
-            if (!ptr) {
-                throw std::runtime_error(
-                    "Kernel type mismatch for '" + kernel_name + "': requested type does not "
-                    "match the type used at creation"
-                );
-            }
-            return ptr;
+        auto* kernel = this->findKernel<FuncType>(kernel_name);
+        if (kernel == nullptr) {
+            throw std::runtime_error("Kernel not found in cache: " + std::string(kernel_name));
         }
-        throw std::runtime_error("Kernel not found in cache: " + kernel_name);
+        return kernel;
     }
 
+    /// Create or retrieve a kernel from inline source. If the kernel already
+    /// exists in the cache, returns the cached instance. FuncType is the
+    /// function signature of the kernel (e.g. void(float*, float*, int)).
+    ///
+    /// This overload is used when the options are given as a list of string
+    /// literals (e.g. `{"-std=c++17"}`), and does not allocate any memory when
+    /// the kernel is already in the cache.
     template <typename FuncType>
     CachedKernel<FuncType>* create(
-        const std::string& kernel_name,
-        const std::string& code,
-        const std::string& path,
-        std::vector<std::string> options
+        std::string_view kernel_name,
+        const char* code,
+        const char* path,
+        std::initializer_list<const char*> options
     ) {
-        return this->create<FuncType>(kernel_name, code.c_str(), path.c_str(), std::move(options));
+        return this->createImpl<FuncType>(kernel_name, code, path, [&]() {
+            return std::vector<std::string>(options.begin(), options.end());
+        });
     }
 
     /// Create or retrieve a kernel from inline source. If the kernel already
@@ -1695,41 +1704,81 @@ class KernelFactory {
     /// function signature of the kernel (e.g. void(float*, float*, int)).
     template <typename FuncType>
     CachedKernel<FuncType>* create(
-        const std::string& kernel_name,
+        std::string_view kernel_name,
         const char* code,
         const char* path,
         std::vector<std::string> options
     ) {
-        static_assert(std::is_function_v<FuncType>, "FuncType must be a function type (e.g. void(float*, int))");
-        std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
-        auto it = kernel_cache_.find(kernel_name);
-        if (it != kernel_cache_.end()) {
-            auto* ptr = dynamic_cast<CachedKernel<FuncType>*>(it->second.get());
-            if (!ptr) {
-                throw std::runtime_error(
-                    "Kernel type mismatch for '" + kernel_name + "': requested type does not "
-                    "match the type used at creation"
-                );
-            }
-            return ptr;
-        }
+        return this->createImpl<FuncType>(kernel_name, code, path, [&]() {
+            return std::move(options);
+        });
+    }
 
-        auto kernel = std::make_unique<CachedKernel<FuncType>>(
-            kernel_name, code, path, std::move(options)
-        );
-        auto* ptr = kernel.get();
-        kernel_cache_[kernel_name] = std::move(kernel);
-        return ptr;
+    template <typename FuncType>
+    CachedKernel<FuncType>* create(
+        std::string_view kernel_name,
+        const std::string& code,
+        const std::string& path,
+        std::vector<std::string> options
+    ) {
+        return this->create<FuncType>(kernel_name, code.c_str(), path.c_str(), std::move(options));
     }
 
   private:
     KernelFactory() {}
-    std::unordered_map<std::string, std::unique_ptr<CachedKernelBase>> kernel_cache_;
 
-    static std::mutex kernel_cache_mutex_;
+    /// Find the kernel with the given name in the cache, returning `nullptr` if
+    /// it does not exist yet. `kernel_cache_mutex_` must be held by the caller.
+    template <typename FuncType>
+    CachedKernel<FuncType>* findKernel(std::string_view kernel_name) {
+        auto it = kernel_cache_.find(kernel_name);
+        if (it == kernel_cache_.end()) {
+            return nullptr;
+        }
+
+        auto* ptr = dynamic_cast<CachedKernel<FuncType>*>(it->second.get());
+        if (!ptr) {
+            throw std::runtime_error(
+                "Kernel type mismatch for '" + std::string(kernel_name) + "': requested "
+                "type does not match the type used at creation"
+            );
+        }
+        return ptr;
+    }
+
+    /// Implementation of `create()`. The options are only built (by calling
+    /// `make_options()`) when the kernel is not in the cache yet.
+    template <typename FuncType, typename MakeOptions>
+    CachedKernel<FuncType>* createImpl(
+        std::string_view kernel_name,
+        const char* code,
+        const char* path,
+        MakeOptions&& make_options
+    ) {
+        static_assert(std::is_function_v<FuncType>, "FuncType must be a function type (e.g. void(float*, int))");
+        std::lock_guard<std::mutex> kernel_cache_lock(kernel_cache_mutex_);
+        auto* existing = this->findKernel<FuncType>(kernel_name);
+        if (existing != nullptr) {
+            return existing;
+        }
+
+        auto name = std::string(kernel_name);
+        auto kernel = std::make_unique<CachedKernel<FuncType>>(
+            name, code, path, make_options()
+        );
+        auto* ptr = kernel.get();
+        kernel_cache_.emplace(std::move(name), std::move(kernel));
+        return ptr;
+    }
+
+    /// The kernels created on this device. This uses `std::less<>` to allow
+    /// looking up kernels by `std::string_view` without creating a
+    /// `std::string`.
+    std::map<std::string, std::unique_ptr<CachedKernelBase>, std::less<>> kernel_cache_;
+    /// Protects `kernel_cache_`. Each device has its own mutex, so threads
+    /// working with different devices do not wait for each other.
+    std::mutex kernel_cache_mutex_;
 };
-
-inline std::mutex KernelFactory::kernel_cache_mutex_;
 
 } // namespace gpulite
 

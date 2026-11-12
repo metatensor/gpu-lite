@@ -32,7 +32,7 @@ else()
 endif()
 
 # Build examples by default when building gpu-lite as the main project
-option(GPULITE_BUILD_EXAMPLES "Build gpulite examples" GPULITE_MAIN_PROJECT)
+option(GPULITE_BUILD_EXAMPLES "Build gpulite examples" ${GPULITE_MAIN_PROJECT})
 
 if(GPULITE_BUILD_EXAMPLES)
     enable_testing()
