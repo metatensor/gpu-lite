@@ -1,4 +1,5 @@
-// gpulite: utilities to find and dynamically load shared libraries
+// gpulite: utilities to find and dynamically load shared libraries, and to
+// check the results of calls into them
 #ifndef GPULITE_DLOPEN_HPP
 #define GPULITE_DLOPEN_HPP
 
@@ -251,6 +252,21 @@ inline std::optional<std::filesystem::path> FindBestCudaDll(const std::wstring& 
 }
 
 #endif
+
+/// Check the return code of a call into a dynamically loaded library, and
+/// throw an exception with the error message if it failed.
+template <typename Res, typename ErrFuncType>
+auto checkCall(Res status, Res sucess, ErrFuncType errFunc, const char* file, int line, const char* call) {
+    if (status != sucess) {
+        auto errorString = errFunc(status);
+        auto functionCall = std::string(call);
+        throw std::runtime_error(
+            functionCall + ": failed with error " + errorString +
+            " (error code " + std::to_string(status) + ") at " +
+            file + ':' + std::to_string(line)
+        );
+    }
+}
 
 inline std::string basename(const std::string& path) {
     auto fs_path = std::filesystem::path(path);
