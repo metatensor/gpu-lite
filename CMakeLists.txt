@@ -48,6 +48,10 @@ endif()
 install(TARGETS gpulite EXPORT gpuliteConfig)
 install(FILES
     gpulite/gpulite.hpp
+    gpulite/dlopen.hpp
+    gpulite/cuda_api.hpp
+    gpulite/cuda_lib.hpp
+    gpulite/kernel.hpp
     DESTINATION include/gpulite
 )
 install(EXPORT gpuliteConfig DESTINATION lib/cmake/gpulite)

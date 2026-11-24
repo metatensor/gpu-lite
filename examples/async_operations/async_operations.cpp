@@ -3,7 +3,6 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
-#include <vector>
 
 const char* kernel_source = R"(
 extern "C" __global__ void scale_array(float* data, float scale, int n) {
