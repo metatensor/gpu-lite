@@ -41,6 +41,7 @@ if(GPULITE_BUILD_EXAMPLES)
     add_subdirectory(examples/matrix_multiply)
     add_subdirectory(examples/templated_kernels)
     add_subdirectory(examples/async_operations)
+    add_subdirectory(examples/hip_vector_add)
 
 endif()
 
@@ -51,6 +52,8 @@ install(FILES
     gpulite/dlopen.hpp
     gpulite/cuda_api.hpp
     gpulite/cuda_lib.hpp
+    gpulite/hip_api.hpp
+    gpulite/hip_lib.hpp
     gpulite/kernel.hpp
     DESTINATION include/gpulite
 )

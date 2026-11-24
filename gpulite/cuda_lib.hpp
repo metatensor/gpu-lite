@@ -3,9 +3,6 @@
 #ifndef GPULITE_CUDA_LIB_HPP
 #define GPULITE_CUDA_LIB_HPP
 
-#include <stdexcept>
-#include <string>
-
 #include "./cuda_api.hpp"
 #include "./dlopen.hpp"
 
@@ -504,19 +501,6 @@ class NVRTC {
 };
 
 namespace details {
-
-template <typename Res, typename ErrFuncType>
-auto checkCall(Res status, Res sucess, ErrFuncType errFunc, const char* file, int line, const char* call) {
-    if (status != sucess) {
-        auto errorString = errFunc(status);
-        auto functionCall = std::string(call);
-        throw std::runtime_error(
-            functionCall + ": failed with error " + errorString +
-            " (error code " + std::to_string(status) + ") at " +
-            file + ':' + std::to_string(line)
-        );
-    }
-}
 
 inline const char* cudaDriverErrorString(CUresult error) {
     if (CUDADriver::instance().loaded()) {
