@@ -20,7 +20,7 @@ build rocm:
 
 test rocm:
   stage: test
-  extends: .container-runner-daint-mi300
+  extends: .container-runner-beverin-mi300
   image: $PERSIST_IMAGE_NAME
   timeout: 24h
   script:
