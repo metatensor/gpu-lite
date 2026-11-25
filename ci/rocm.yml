@@ -27,7 +27,7 @@ test rocm:
     - ctest -V --test-dir /gpu-lite/build/
   variables:
     SLURM_JOB_NUM_NODES: 1
-    SLURM_PARTITION: normal
+    SLURM_PARTITION: mi300
     SLURM_NTASKS: 1
     SLURM_TIMELIMIT: "00:05:00"
     USE_MPI: "OFF"
