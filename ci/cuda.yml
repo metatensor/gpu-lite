@@ -6,15 +6,15 @@ stages:
   - test
 
 variables:
-  PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/gpulite:$CI_COMMIT_SHORT_SHA
+  PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/gpulite-cuda:$CI_COMMIT_SHORT_SHA
 
-build:
+build cuda:
   stage: build
   extends: .container-builder-cscs-gh200
   variables:
     DOCKERFILE: ci/containers/Containerfile
 
-test:
+test cuda:
   stage: test
   extends: .container-runner-daint-gh200
   image: $PERSIST_IMAGE_NAME

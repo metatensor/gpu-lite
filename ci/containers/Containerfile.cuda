@@ -1,4 +1,4 @@
-FROM docker://nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
+FROM docker://nvidia/cuda:13.4.3-cudnn-devel-ubuntu24.04
 
 ENV CUDA_HOME="/usr/local/cuda"
 
