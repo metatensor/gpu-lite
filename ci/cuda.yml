@@ -12,7 +12,7 @@ build cuda:
   stage: build
   extends: .container-builder-cscs-gh200
   variables:
-    DOCKERFILE: ci/containers/Containerfile
+    DOCKERFILE: ci/containers/Containerfile.cuda
 
 test cuda:
   stage: test
