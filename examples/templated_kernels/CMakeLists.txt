@@ -23,3 +23,4 @@ set_target_properties(templated_kernels PROPERTIES
 )
 
 add_test(NAME templated_kernels COMMAND templated_kernels)
+set_tests_properties(templated_kernels PROPERTIES LABELS "cuda")

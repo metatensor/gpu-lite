@@ -11,3 +11,4 @@ target_include_directories(async_operations PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(async_operations PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 
 add_test(NAME async_operations COMMAND async_operations)
+set_tests_properties(async_operations PROPERTIES LABELS "cuda")
