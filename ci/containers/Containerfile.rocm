@@ -1,5 +1,7 @@
 FROM docker://rocm/dev-ubuntu-24.04:10.1.0-full
 
+ENV LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+
 RUN apt update && apt install -y cmake ninja-build && apt clean
 
 COPY . /gpu-lite/
