@@ -6,21 +6,21 @@ stages:
   - test
 
 variables:
-  PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/gpulite:$CI_COMMIT_SHORT_SHA
+  PERSIST_IMAGE_NAME: $CSCS_REGISTRY_PATH/gpulite-cuda:$CI_COMMIT_SHORT_SHA
 
-build:
+build cuda:
   stage: build
   extends: .container-builder-cscs-gh200
   variables:
-    DOCKERFILE: ci/containers/Containerfile
+    DOCKERFILE: ci/containers/Containerfile.cuda
 
-test:
+test cuda:
   stage: test
   extends: .container-runner-daint-gh200
   image: $PERSIST_IMAGE_NAME
   timeout: 24h
   script:
-    - ctest -V --test-dir /gpu-lite/build/
+    - ctest -V --test-dir /gpu-lite/build/ -L "cuda"
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_PARTITION: normal

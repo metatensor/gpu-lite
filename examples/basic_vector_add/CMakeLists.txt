@@ -23,3 +23,4 @@ set_target_properties(vector_add PROPERTIES
 )
 
 add_test(NAME vector_add COMMAND vector_add)
+set_tests_properties(vector_add PROPERTIES LABELS "cuda")
