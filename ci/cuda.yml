@@ -20,7 +20,7 @@ test cuda:
   image: $PERSIST_IMAGE_NAME
   timeout: 24h
   script:
-    - ctest -V --test-dir /gpu-lite/build/
+    - ctest -V --test-dir /gpu-lite/build/ -L "cuda"
   variables:
     SLURM_JOB_NUM_NODES: 1
     SLURM_PARTITION: normal
