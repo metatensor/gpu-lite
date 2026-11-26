@@ -23,3 +23,4 @@ set_target_properties(matrix_multiply PROPERTIES
 )
 
 add_test(NAME matrix_multiply COMMAND matrix_multiply)
+set_tests_properties(matrix_multiply PROPERTIES LABELS "cuda")

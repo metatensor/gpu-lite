@@ -25,3 +25,4 @@ set_target_properties(hip_vector_add PROPERTIES
 add_test(NAME hip_vector_add COMMAND hip_vector_add)
 # the example exits with 77 when the HIP libraries are not available
 set_tests_properties(hip_vector_add PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(hip_vector_add PROPERTIES LABELS "rocm")
