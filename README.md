@@ -31,7 +31,7 @@ Traditional CUDA applications require the CUDA SDK to be installed at build time
 
 int main() {
     // Check if CUDA is available
-    if (!CUDA_DRIVER_INSTANCE.loaded() || !NVRTC_INSTANCE.loaded()) {
+    if (!gpulite::CUDADriver::loaded() || !gpulite::CUDART::loaded() || !gpulite::NVRTC::loaded()) {
         throw std::runtime_error("CUDA runtime not available");
     }
 
@@ -45,9 +45,15 @@ int main() {
         }
     )";
 
-    // Create kernel factory and cache the kernel
-    auto& factory = KernelFactory::instance();
-    auto* kernel = factory.create(
+    // Create kernel factory for CUDA device 0 (use `gpulite::Api::HIP` to
+    // compile and launch kernels with HIP on AMD GPUs instead)
+    auto& factory = gpulite::KernelFactory::instance(gpulite::Api::CUDA, 0);
+
+    // Kernel declaration matching the source passed to NVRTC
+    __global__ void vector_add(float* a, float* b, float* c, int n);
+
+    // Create and cache the kernel. Compilation happens on the first launch
+    auto* kernel = factory.create<decltype(vector_add)>(
         "vector_add",           // kernel name
         kernel_source,          // kernel source code
         "vector_add.cu",        // virtual source filename
@@ -63,18 +69,12 @@ int main() {
     GPULITE_CUDART_CALL(cudaMalloc(reinterpret_cast<void**>(&d_b), n * sizeof(float)));
     GPULITE_CUDART_CALL(cudaMalloc(reinterpret_cast<void**>(&d_c), n * sizeof(float)));
 
-    // Prepare kernel arguments
-    std::vector<void*> args = {&d_a, &d_b, &d_c, &n};
-
-    // Launch kernel
-    kernel->launch(
-        dim3((n + 127) / 128),  // grid size
-        dim3(128),              // block size
-        0,                      // shared memory size
-        nullptr,                // stream
-        args,                   // kernel arguments
-        true                    // synchronize after launch
-    );
+    // Launch kernel, the arguments types are checked against the declaration
+    auto config = gpulite::LaunchConfig();
+    config.gridDim = dim3((n + 127) / 128);
+    config.blockDim = dim3(128);
+    kernel->launch(config, d_a, d_b, d_c, n);
+    GPULITE_CUDART_CALL(cudaDeviceSynchronize());
 
     // Clean up
     GPULITE_CUDART_CALL(cudaFree(d_a));
@@ -114,7 +114,7 @@ my_gpu_app.exe
 
 ```cpp
 // Load kernel from a .cu file
-auto* kernel = KernelFactory::instance().createFromSource(
+auto* kernel = gpulite::KernelFactory::instance(gpulite::Api::CUDA, 0).create<void(float*, int)>(
     "my_kernel",
     "/path/to/kernel.cu",
     "kernel.cu",
@@ -215,6 +215,10 @@ kernel->setFuncAttribute(CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, 8192);
 // Get kernel register usage
 int reg_count = kernel->getFuncAttribute(CU_FUNC_ATTRIBUTE_NUM_REGS);
 std::cout << "Kernel uses " << reg_count << " registers per thread" << std::endl;
+
+// For HIP kernels, use the `HIP_FUNC_ATTRIBUTE_*` values instead. Setting
+// function attributes is not supported with HIP.
+int hip_reg_count = hip_kernel->getFuncAttribute(HIP_FUNC_ATTRIBUTE_NUM_REGS);
 ```
 
 ### Asynchronous Execution
@@ -224,13 +228,14 @@ std::cout << "Kernel uses " << reg_count << " registers per thread" << std::endl
 cudaStream_t stream;
 GPULITE_CUDART_CALL(cudaStreamCreate(&stream));
 
-// Launch kernel asynchronously
-kernel->launch(
-    grid, block, shared_mem_size,
-    reinterpret_cast<void*>(stream),
-    args,
-    false  // don't synchronize
-);
+// Launch kernel asynchronously. `LaunchConfig::stream` is a `void*`, which can
+// hold either a `cudaStream_t` or a `hipStream_t`
+auto config = gpulite::LaunchConfig();
+config.gridDim = grid;
+config.blockDim = block;
+config.dynamicSmemBytes = shared_mem_size;
+config.stream = stream;
+kernel->launch(config, d_data, n);
 
 // Do other work...
 
@@ -246,7 +251,7 @@ gpulite provides comprehensive error checking with detailed error messages:
 ```cpp
 try {
     auto* kernel = factory.create("my_kernel", source, "kernel.cu", {});
-    kernel->launch(grid, block, 0, nullptr, args);
+    kernel->launch(config, d_data, n);
 } catch (const std::runtime_error& e) {
     std::cerr << "CUDA Error: " << e.what() << std::endl;
     // Error message includes file and line information
@@ -293,7 +298,7 @@ try {
 | Platform | Status |
 |----------|--------|
 | CUDA    | ✅ Supported |
-| HIP  | 🚧 Planned |
+| HIP  | ✅ Supported (`gpulite::Api::HIP`, ROCm 6+) |
 
 ## Performance Considerations
 

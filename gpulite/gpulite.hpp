@@ -1,4 +1,4 @@
-// gpulite: a lightweight C++ library for dynamic CUDA runtime compilation
+// gpulite: a lightweight C++ library for dynamic CUDA and HIP runtime compilation
 #ifndef GPULITE_HPP
 #define GPULITE_HPP
 
@@ -16,6 +16,8 @@
 #include "./dlopen.hpp"         // IWYU pragma: export
 #include "./cuda_api.hpp"       // IWYU pragma: export
 #include "./cuda_lib.hpp"       // IWYU pragma: export
+#include "./hip_api.hpp"        // IWYU pragma: export
+#include "./hip_lib.hpp"        // IWYU pragma: export
 #include "./kernel.hpp"         // IWYU pragma: export
 
 #endif // GPULITE_HPP

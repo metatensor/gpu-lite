@@ -1,9 +1,8 @@
-#include <gpulite/hip_lib.hpp>
+#include <gpulite/gpulite.hpp>
 
 #include <cmath>
 #include <iostream>
 #include <random>
-#include <string>
 #include <vector>
 
 // Exit code used to tell CTest that this example was skipped
@@ -54,34 +53,19 @@ extern "C" __global__ void vector_add(const float* a, const float* b, float* c, 
 }
 )";
 
-        // Compile the kernel with HIPRTC. Without an explicit
-        // `--offload-arch`, HIPRTC compiles for the current device.
-        std::cout << "Compiling kernel..." << std::endl;
-        hiprtcProgram program = nullptr;
-        GPULITE_HIPRTC_CALL(hiprtcCreateProgram(&program, kernel_source, "vector_add.hip", 0, nullptr, nullptr));
+        // Create and cache the kernel. Compilation with HIPRTC happens on the
+        // first launch, for the device holding the kernel arguments.
+        auto& factory = gpulite::KernelFactory::instance(gpulite::Api::HIP, 0);
 
-        const char* options[] = {"-std=c++17"};
-        auto compileResult = gpulite::HIPRTC::instance().hiprtcCompileProgram(program, 1, options);
-        if (compileResult != HIPRTC_SUCCESS) {
-            size_t logSize = 0;
-            GPULITE_HIPRTC_CALL(hiprtcGetProgramLogSize(program, &logSize));
-            auto log = std::string(logSize, '\0');
-            GPULITE_HIPRTC_CALL(hiprtcGetProgramLog(program, &log[0]));
-            gpulite::HIPRTC::instance().hiprtcDestroyProgram(&program);
-            throw std::runtime_error("Failed to compile HIP program:\n" + log);
-        }
+        // Kernel declaration matching the source passed to HIPRTC
+        __global__ void vector_add(const float* a, const float* b, float* c, int n);
 
-        size_t codeSize = 0;
-        GPULITE_HIPRTC_CALL(hiprtcGetCodeSize(program, &codeSize));
-        auto code = std::vector<char>(codeSize);
-        GPULITE_HIPRTC_CALL(hiprtcGetCode(program, code.data()));
-        GPULITE_HIPRTC_CALL(hiprtcDestroyProgram(&program));
-
-        // Load the compiled code object and get the kernel
-        hipModule_t module = nullptr;
-        GPULITE_HIP_CALL(hipModuleLoadData(&module, code.data()));
-        hipFunction_t kernel = nullptr;
-        GPULITE_HIP_CALL(hipModuleGetFunction(&kernel, module, "vector_add"));
+        auto* kernel = factory.create<decltype(vector_add)>(
+            "vector_add",           // kernel name
+            kernel_source,          // kernel source code
+            "vector_add.hip",       // virtual source filename
+            {"-std=c++17"}          // compilation options
+        );
 
         // Allocate device memory and copy data to device
         float *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
@@ -97,17 +81,10 @@ extern "C" __global__ void vector_add(const float* a, const float* b, float* c, 
         unsigned int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
         std::cout << "Launching kernel with " << blocksPerGrid << " blocks of " << threadsPerBlock << " threads" << std::endl;
 
-        int n = N;
-        void* args[] = {&d_a, &d_b, &d_c, &n};
-        GPULITE_HIP_CALL(hipModuleLaunchKernel(
-            kernel,
-            blocksPerGrid, 1, 1,
-            threadsPerBlock, 1, 1,
-            0,          // shared memory
-            nullptr,    // default stream
-            args,
-            nullptr
-        ));
+        auto config = gpulite::LaunchConfig();
+        config.gridDim = dim3(blocksPerGrid);
+        config.blockDim = dim3(threadsPerBlock);
+        kernel->launch(config, d_a, d_b, d_c, N);
         GPULITE_HIP_CALL(hipDeviceSynchronize());
 
         // Copy result back to host and verify
@@ -134,7 +111,6 @@ extern "C" __global__ void vector_add(const float* a, const float* b, float* c, 
         GPULITE_HIP_CALL(hipFree(d_a));
         GPULITE_HIP_CALL(hipFree(d_b));
         GPULITE_HIP_CALL(hipFree(d_c));
-        GPULITE_HIP_CALL(hipModuleUnload(module));
 
         return success ? 0 : 1;
 

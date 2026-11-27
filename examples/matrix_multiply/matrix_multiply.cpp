@@ -124,7 +124,7 @@ extern "C" __global__ void matrix_multiply(float* A, float* B, float* C, int N) 
         GPULITE_CUDART_CALL(cudaMemcpy(d_b, h_b.data(), size, cudaMemcpyHostToDevice));
 
         // Create and cache kernel
-        auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
+        auto& factory = gpulite::KernelFactory::instance(gpulite::Api::CUDA, 0);
         std::cout << "Compiling kernel..." << std::endl;
 
         // Kernel declaration matching the source passed to NVRTC

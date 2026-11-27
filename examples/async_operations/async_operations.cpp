@@ -63,7 +63,7 @@ int main() {
         GPULITE_CUDART_CALL(cudaStreamCreate(&streams[1]));
 
         // Compile kernel
-        auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
+        auto& factory = gpulite::KernelFactory::instance(gpulite::Api::CUDA, 0);
         std::cout << "\nCompiling kernel..." << std::endl;
 
         // Kernel declaration matching the source passed to NVRTC

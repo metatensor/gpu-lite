@@ -1,7 +1,8 @@
-// gpulite: runtime compilation, caching and launching of CUDA kernels
+// gpulite: runtime compilation, caching and launching of CUDA and HIP kernels
 #ifndef GPULITE_KERNEL_HPP
 #define GPULITE_KERNEL_HPP
 
+#include <cassert>
 #include <cstddef>
 #include <cstdlib>
 
@@ -35,6 +36,8 @@
 
 #include "./cuda_api.hpp"
 #include "./cuda_lib.hpp"
+#include "./hip_api.hpp"
+#include "./hip_lib.hpp"
 
 namespace gpulite {
 
@@ -150,14 +153,24 @@ template <typename T, typename... Ts> std::string getTemplateKernelName(const st
 }
 
 // =============================================================================
-// CUDA Kernel Cache Manager - Runtime compilation and caching system
+// Kernel Cache Manager - Runtime compilation and caching system
 // =============================================================================
+
+/// GPU API used to compile and launch kernels
+enum class Api {
+    /// NVIDIA CUDA, using NVRTC and the CUDA driver API
+    CUDA,
+    /// AMD HIP, using HIPRTC and the HIP module API
+    HIP,
+};
 
 struct LaunchConfig {
     dim3 gridDim = dim3(1);
     dim3 blockDim = dim3(1);
     size_t dynamicSmemBytes = 0;
-    cudaStream_t stream = nullptr;
+    /// Stream to launch the kernel on, either a `cudaStream_t`/`CUstream` or
+    /// a `hipStream_t` depending on the API of the kernel.
+    void* stream = nullptr;
 };
 
 /// Container class for the cached kernels. Provides functionality for launching
@@ -166,31 +179,62 @@ struct LaunchConfig {
 class CachedKernelBase {
 public:
     CachedKernelBase(
+        Api api,
         const std::string& kernel_name,
         const std::string& code,
         const std::string& path,
         std::vector<std::string> options
-    ): CachedKernelBase(kernel_name, code.c_str(), path.c_str(), std::move(options)) {}
+    ): CachedKernelBase(api, kernel_name, code.c_str(), path.c_str(), std::move(options)) {}
 
     CachedKernelBase(
+        Api api,
         const std::string& kernel_name,
         const char* code,
         const char* path,
         std::vector<std::string> options
-    ): kernel_name_(kernel_name), options_(std::move(options)) {
+    ): api_(api), kernel_name_(kernel_name), options_(std::move(options)) {
+        if (api_ == Api::CUDA) {
+            if (!NVRTC::loaded() || !CUDADriver::loaded()) {
+                throw std::runtime_error(
+                    "could not load the NVRTC and CUDA driver libraries"
+                );
+            }
+        } else {
+            assert(api_ == Api::HIP);
+            if (!HIPRTC::loaded() || !HIPRuntime::loaded()) {
+                throw std::runtime_error(
+                    "could not load the HIPRTC and HIP runtime libraries"
+                );
+            }
+        }
+
         // Check if debug option is enabled
         this->debug_ = std::any_of(
             this->options_.cbegin(), this->options_.cend(),
-            [](const std::string& opt) {
-                return opt == "-G" || opt == "--device-debug";
+            [&](const std::string& opt) {
+                if (api_ == Api::CUDA) {
+                    return opt == "-G" || opt == "--device-debug";
+                } else {
+                    assert(api_ == Api::HIP);
+                    return opt == "-g";
+                }
             }
         );
 
-        // When debugging, write source to a real file so cuda-gdb can find it
-        std::string effective_source_name = path ? path : (this->kernel_name_ + std::string(".cu"));
+        // When debugging, write source to a real file so cuda-gdb/rocgdb can find it
+        std::string effective_source_name;
+        if (path) {
+            effective_source_name = path;
+        } else if (api_ == Api::CUDA) {
+            effective_source_name = this->kernel_name_ + ".cu";
+        } else {
+            assert(api_ == Api::HIP);
+            effective_source_name = this->kernel_name_ + ".hip";
+        }
+
         if (this->debug_) {
             // Create a debug source file in the current working directory
-            // Use absolute path so cuda-gdb can reliably find it
+            // Use absolute path so the debugger can reliably find it
             char cwd[4096];
             if (getcwd(cwd, sizeof(cwd)) != nullptr) {
                 effective_source_name = std::string(cwd) + "/" + effective_source_name;
@@ -207,16 +251,34 @@ public:
             }
         }
 
-        GPULITE_NVRTC_CALL(nvrtcCreateProgram(
-            &this->program_, code, effective_source_name.c_str(), 0, nullptr, nullptr
-        ));
-
-        GPULITE_NVRTC_CALL(nvrtcAddNameExpression(this->program_, this->kernel_name_.c_str()));
+        if (api_ == Api::CUDA) {
+            nvrtcProgram program = nullptr;
+            GPULITE_NVRTC_CALL(nvrtcCreateProgram(
+                &program, code, effective_source_name.c_str(), 0, nullptr, nullptr
+            ));
+            this->program_ = program;
+            GPULITE_NVRTC_CALL(nvrtcAddNameExpression(program, this->kernel_name_.c_str()));
+        } else {
+            assert(api_ == Api::HIP);
+            hiprtcProgram program = nullptr;
+            GPULITE_HIPRTC_CALL(hiprtcCreateProgram(
+                &program, code, effective_source_name.c_str(), 0, nullptr, nullptr
+            ));
+            this->program_ = program;
+            GPULITE_HIPRTC_CALL(hiprtcAddNameExpression(program, this->kernel_name_.c_str()));
+        }
     }
 
     virtual ~CachedKernelBase() {
         if (this->program_) {
-            NVRTC::instance().nvrtcDestroyProgram(&this->program_);
+            if (api_ == Api::CUDA) {
+                auto program = static_cast<nvrtcProgram>(this->program_);
+                NVRTC::instance().nvrtcDestroyProgram(&program);
+            } else {
+                assert(api_ == Api::HIP);
+                auto program = static_cast<hiprtcProgram>(this->program_);
+                HIPRTC::instance().hiprtcDestroyProgram(&program);
+            }
         }
     }
 
@@ -225,13 +287,36 @@ public:
     CachedKernelBase(CachedKernelBase&&) = delete;
     CachedKernelBase& operator=(CachedKernelBase&&) = delete;
 
-    inline void setFuncAttribute(CUfunction_attribute attribute, int value) const {
-        GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(function_, attribute, value));
+    /// Get the API used by this kernel
+    Api api() const {
+        return api_;
     }
 
+    /// Set a CUDA function attribute. Only available for CUDA kernels.
+    void setFuncAttribute(CUfunction_attribute attribute, int value) const {
+        this->checkApi(Api::CUDA, "setFuncAttribute(CUfunction_attribute)");
+        GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(
+            static_cast<CUfunction>(function_), attribute, value
+        ));
+    }
+
+    /// Get a CUDA function attribute. Only available for CUDA kernels.
     int getFuncAttribute(CUfunction_attribute attribute) const {
+        this->checkApi(Api::CUDA, "getFuncAttribute(CUfunction_attribute)");
         int value;
-        GPULITE_CUDA_DRIVER_CALL(cuFuncGetAttribute(&value, attribute, function_));
+        GPULITE_CUDA_DRIVER_CALL(cuFuncGetAttribute(
+            &value, attribute, static_cast<CUfunction>(function_)
+        ));
+        return value;
+    }
+
+    /// Get a HIP function attribute. Only available for HIP kernels.
+    int getFuncAttribute(hipFunction_attribute attribute) const {
+        this->checkApi(Api::HIP, "getFuncAttribute(hipFunction_attribute)");
+        int value;
+        GPULITE_HIP_CALL(hipFuncGetAttribute(
+            &value, attribute, static_cast<hipFunction_t>(function_)
+        ));
         return value;
     }
 
@@ -244,80 +329,145 @@ protected:
         if (!compiled_.load(std::memory_order_acquire)) {
             std::lock_guard<std::mutex> lock(compile_mutex_);
             if (!compiled_.load(std::memory_order_relaxed)) {
-                this->compileKernel(args, n_args);
+                if (api_ == Api::CUDA) {
+                    this->compileKernelCuda(args, n_args);
+                } else {
+                    assert(api_ == Api::HIP);
+                    this->compileKernelHip(args, n_args);
+                }
             }
         }
 
-        CUcontext currentContext = nullptr;
-        CUresult result = CUDADriver::instance().cuCtxGetCurrent(&currentContext);
+        if (api_ == Api::CUDA) {
+            CUcontext currentContext = nullptr;
+            CUresult result = CUDADriver::instance().cuCtxGetCurrent(&currentContext);
 
-        if (result != CUDA_SUCCESS || !currentContext) {
-            throw std::runtime_error("CachedKernelBase::launch error getting current context.");
-        }
+            if (result != CUDA_SUCCESS || !currentContext) {
+                throw std::runtime_error("CachedKernelBase::launch error getting current context.");
+            }
 
-        if (currentContext != context_) {
-            GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(context_));
-        }
+            if (currentContext != context_) {
+                GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(context_));
+            }
 
-        this->checkAndAdjustSharedMem(config.dynamicSmemBytes);
+            this->checkAndAdjustSharedMem(config.dynamicSmemBytes);
 
-         GPULITE_CUDA_DRIVER_CALL(cuLaunchKernel(
-            function_,
-            config.gridDim.x,
-            config.gridDim.y,
-            config.gridDim.z,
-            config.blockDim.x,
-            config.blockDim.y,
-            config.blockDim.z,
-            config.dynamicSmemBytes,
-            config.stream,
-            const_cast<void**>(args),
-            nullptr
-        ));
+            GPULITE_CUDA_DRIVER_CALL(cuLaunchKernel(
+                static_cast<CUfunction>(function_),
+                config.gridDim.x,
+                config.gridDim.y,
+                config.gridDim.z,
+                config.blockDim.x,
+                config.blockDim.y,
+                config.blockDim.z,
+                config.dynamicSmemBytes,
+                static_cast<CUstream>(config.stream),
+                const_cast<void**>(args),
+                nullptr
+            ));
 
-        if (currentContext != context_) {
-            GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(currentContext));
+            if (currentContext != context_) {
+                GPULITE_CUDA_DRIVER_CALL(cuCtxSetCurrent(currentContext));
+            }
+        } else {
+            assert(api_ == Api::HIP);
+            int currentDevice = -1;
+            GPULITE_HIP_CALL(hipGetDevice(&currentDevice));
+
+            if (currentDevice != device_) {
+                GPULITE_HIP_CALL(hipSetDevice(device_));
+            }
+
+            this->checkAndAdjustSharedMem(config.dynamicSmemBytes);
+
+            GPULITE_HIP_CALL(hipModuleLaunchKernel(
+                static_cast<hipFunction_t>(function_),
+                config.gridDim.x,
+                config.gridDim.y,
+                config.gridDim.z,
+                config.blockDim.x,
+                config.blockDim.y,
+                config.blockDim.z,
+                static_cast<unsigned int>(config.dynamicSmemBytes),
+                static_cast<hipStream_t>(config.stream),
+                const_cast<void**>(args),
+                nullptr
+            ));
+
+            if (currentDevice != device_) {
+                GPULITE_HIP_CALL(hipSetDevice(currentDevice));
+            }
         }
     }
 
 private:
+    void checkApi(Api expected, const char* function) const {
+        if (api_ != expected) {
+            std::string api_name;
+            if (expected == Api::CUDA) {
+                api_name = "CUDA";
+            } else {
+                assert(expected == Api::HIP);
+                api_name = "HIP";
+            }
+            throw std::runtime_error(
+                std::string("CachedKernelBase::") + function + " is only available for " +
+                api_name + " kernels"
+            );
+        }
+    }
+
     /// The default shared memory space on most recent NVIDIA cards is 49152
     /// bytes. This method attempts to adjust the shared memory to fit the
     /// requested configuration if the kernel launch parameters exceeds the
-    /// default 49152 bytes.
+    /// default 49152 bytes. AMD GPUs do not need to opt-in to use more shared
+    /// memory, so we only check that the request fits on the device.
     void checkAndAdjustSharedMem(int query_shared_mem_size) {
         if (current_smem_size_ == 0) {
-            CUdevice cuDevice;
-            GPULITE_CUDA_DRIVER_CALL(cuCtxGetDevice(&cuDevice));
+            if (api_ == Api::CUDA) {
+                CUdevice cuDevice;
+                GPULITE_CUDA_DRIVER_CALL(cuCtxGetDevice(&cuDevice));
 
-            GPULITE_CUDA_DRIVER_CALL(cuDeviceGetAttribute(
-                &max_smem_size_optin_, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, cuDevice
-            ));
+                GPULITE_CUDA_DRIVER_CALL(cuDeviceGetAttribute(
+                    &max_smem_size_optin_, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, cuDevice
+                ));
 
-            int reserved_smem_per_block = 0;
+                int reserved_smem_per_block = 0;
 
-            GPULITE_CUDA_DRIVER_CALL(cuDeviceGetAttribute(
-                &reserved_smem_per_block, CU_DEVICE_ATTRIBUTE_RESERVED_SHARED_MEMORY_PER_BLOCK, cuDevice
-            ));
+                GPULITE_CUDA_DRIVER_CALL(cuDeviceGetAttribute(
+                    &reserved_smem_per_block, CU_DEVICE_ATTRIBUTE_RESERVED_SHARED_MEMORY_PER_BLOCK, cuDevice
+                ));
 
-            int curr_max_smem_per_block = 0;
+                int curr_max_smem_per_block = 0;
 
-            GPULITE_CUDA_DRIVER_CALL(cuDeviceGetAttribute(
-                &curr_max_smem_per_block, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, cuDevice
-            ));
+                GPULITE_CUDA_DRIVER_CALL(cuDeviceGetAttribute(
+                    &curr_max_smem_per_block, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, cuDevice
+                ));
 
-            current_smem_size_ = (curr_max_smem_per_block - reserved_smem_per_block);
+                current_smem_size_ = (curr_max_smem_per_block - reserved_smem_per_block);
+            } else {
+                assert(api_ == Api::HIP);
+                GPULITE_HIP_CALL(hipDeviceGetAttribute(
+                    &current_smem_size_, hipDeviceAttributeMaxSharedMemoryPerBlock, device_
+                ));
+                max_smem_size_optin_ = current_smem_size_;
+            }
         }
 
         if (query_shared_mem_size > current_smem_size_) {
 
             if (query_shared_mem_size > max_smem_size_optin_) {
                 throw std::runtime_error(
-                    "CachedKernelBase::launch requested more smem than available on card."
+                    "CachedKernelBase::launch requested more shared memory (smem) than available on card."
                 );
             } else {
+                // only reachable for CUDA, since for HIP `max_smem_size_optin_
+                // == current_smem_size_`
+                assert(api_ == Api::CUDA);
                 GPULITE_CUDA_DRIVER_CALL(cuFuncSetAttribute(
-                    function_, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, query_shared_mem_size
+                    static_cast<CUfunction>(function_),
+                    CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    query_shared_mem_size
                 ));
                 current_smem_size_ = query_shared_mem_size;
             }
@@ -329,7 +479,7 @@ private:
     /// auto-detect the compute capability of the available card. args for the
     /// launch need to be queried as we need to grab the CUcontext in which
     /// these ptrs exist.
-    void compileKernel(void* const* kernel_args, size_t n_args) {
+    void compileKernelCuda(void* const* kernel_args, size_t n_args) {
         this->initCudaDriver();
 
         CUcontext currentContext = nullptr;
@@ -377,7 +527,7 @@ private:
         GPULITE_CUDA_DRIVER_CALL(cuCtxGetDevice(&cuDevice));
 
         std::vector<const char*> c_options;
-        c_options.reserve(this->options_.size());
+        c_options.reserve(this->options_.size() + 1);
         for (const auto& option : this->options_) {
             c_options.push_back(option.c_str());
         }
@@ -395,22 +545,25 @@ private:
 
         c_options.push_back(smbuf.c_str());
 
-        nvrtcResult compileResult = NVRTC::instance().nvrtcCompileProgram(this->program_, c_options.size(), c_options.data());
+        auto program = static_cast<nvrtcProgram>(this->program_);
+        nvrtcResult compileResult = NVRTC::instance().nvrtcCompileProgram(
+            program, static_cast<int>(c_options.size()), c_options.data()
+        );
         if (compileResult != NVRTC_SUCCESS) {
             size_t logSize;
-            GPULITE_NVRTC_CALL(nvrtcGetProgramLogSize(this->program_, &logSize));
+            GPULITE_NVRTC_CALL(nvrtcGetProgramLogSize(program, &logSize));
             std::string log(logSize, '\0');
-            GPULITE_NVRTC_CALL(nvrtcGetProgramLog(this->program_, &log[0]));
+            GPULITE_NVRTC_CALL(nvrtcGetProgramLog(program, &log[0]));
             throw std::runtime_error(
-                "KernelFactory::compileAndCacheKernel: Failed to compile CUDA program:\n" + log
+                "CachedKernelBase::compileKernel: Failed to compile CUDA program:\n" + log
             );
         }
 
         // fetch CUBIN
         size_t cubinSize = 0;
-        GPULITE_NVRTC_CALL(nvrtcGetCUBINSize(this->program_, &cubinSize));
+        GPULITE_NVRTC_CALL(nvrtcGetCUBINSize(program, &cubinSize));
         std::vector<char> cubin(cubinSize);
-        GPULITE_NVRTC_CALL(nvrtcGetCUBIN(this->program_, cubin.data()));
+        GPULITE_NVRTC_CALL(nvrtcGetCUBIN(program, cubin.data()));
 
         // load the module from cubin
         CUmodule module = nullptr;
@@ -420,12 +573,11 @@ private:
             // Load with JIT debug info
             CUjit_option opts[1];
             opts[0] = CU_JIT_GENERATE_DEBUG_INFO;
-            void** vals = new void*[1];
+            void* vals[1];
             vals[0] = (void*)(size_t)1;
             cuResult = CUDADriver::instance().cuModuleLoadDataEx(
                 &module, cubin.data(), 1, opts, vals
             );
-            delete[] vals;
         } else {
             // Load without JIT options
             cuResult = CUDADriver::instance().cuModuleLoadDataEx(
@@ -435,15 +587,13 @@ private:
 
         if (cuResult != CUDA_SUCCESS) {
             throw std::runtime_error(
-                "KernelFactory::compileAndCacheKernel: Failed to load PTX code into CUDA "
-                "module "
-                "(error code: " +
-                std::to_string(cuResult) + ")"
+                "CachedKernelBase::compileKernel: Failed to load CUBIN code into CUDA "
+                "module (error code: " + std::to_string(cuResult) + ")"
             );
         }
 
         const char* lowered_name;
-        GPULITE_NVRTC_CALL(nvrtcGetLoweredName(this->program_, this->kernel_name_.c_str(), &lowered_name));
+        GPULITE_NVRTC_CALL(nvrtcGetLoweredName(program, this->kernel_name_.c_str(), &lowered_name));
         CUfunction kernel;
         GPULITE_CUDA_DRIVER_CALL(cuModuleGetFunction(&kernel, module, lowered_name));
 
@@ -452,8 +602,95 @@ private:
         this->context_ = currentContext;
         this->compiled_.store(true, std::memory_order_release);
 
-        GPULITE_NVRTC_CALL(nvrtcDestroyProgram(&this->program_));
+        GPULITE_NVRTC_CALL(nvrtcDestroyProgram(&program));
         this->program_ = nullptr;
+    }
+
+    /// Compiles the kernel with HIPRTC for the device on which the kernel
+    /// arguments live (or the current device if none of the arguments is a
+    /// device pointer), and loads it as a module on this device.
+    void compileKernelHip(void* const* kernel_args, size_t n_args) {
+        GPULITE_HIP_CALL(hipInit(0));
+
+        int previousDevice = -1;
+        GPULITE_HIP_CALL(hipGetDevice(&previousDevice));
+
+        int device = -1;
+        for (size_t ptr_id = 0; ptr_id < n_args; ptr_id++) {
+            unsigned int memtype = 0;
+            hipDeviceptr_t device_ptr = *reinterpret_cast<hipDeviceptr_t*>(kernel_args[ptr_id]);
+
+            hipError_t res = HIPRuntime::instance().hipPointerGetAttribute(
+                &memtype, HIP_POINTER_ATTRIBUTE_MEMORY_TYPE, device_ptr
+            );
+
+            if (res == hipSuccess && memtype == static_cast<unsigned int>(hipMemoryTypeDevice)) {
+                GPULITE_HIP_CALL(hipPointerGetAttribute(
+                    &device, HIP_POINTER_ATTRIBUTE_DEVICE_ORDINAL, device_ptr
+                ));
+
+                if (device >= 0) {
+                    break;
+                }
+            }
+        }
+
+        if (device < 0) {
+            // None of the arguments is a device pointer, use the current device
+            device = previousDevice;
+        }
+
+        if (device != previousDevice) {
+            GPULITE_HIP_CALL(hipSetDevice(device));
+        }
+
+        std::vector<const char*> c_options;
+        c_options.reserve(this->options_.size());
+        for (const auto& option : this->options_) {
+            c_options.push_back(option.c_str());
+        }
+
+        // Without an explicit `--offload-arch`, HIPRTC compiles for the
+        // current device.
+        auto program = static_cast<hiprtcProgram>(this->program_);
+        hiprtcResult compileResult = HIPRTC::instance().hiprtcCompileProgram(
+            program, static_cast<int>(c_options.size()), c_options.data()
+        );
+        if (compileResult != HIPRTC_SUCCESS) {
+            size_t logSize = 0;
+            GPULITE_HIPRTC_CALL(hiprtcGetProgramLogSize(program, &logSize));
+            std::string log(logSize, '\0');
+            GPULITE_HIPRTC_CALL(hiprtcGetProgramLog(program, &log[0]));
+            throw std::runtime_error(
+                "CachedKernelBase::compileKernel: Failed to compile HIP program:\n" + log
+            );
+        }
+
+        // fetch the code object
+        size_t codeSize = 0;
+        GPULITE_HIPRTC_CALL(hiprtcGetCodeSize(program, &codeSize));
+        std::vector<char> code(codeSize);
+        GPULITE_HIPRTC_CALL(hiprtcGetCode(program, code.data()));
+
+        hipModule_t module = nullptr;
+        GPULITE_HIP_CALL(hipModuleLoadData(&module, code.data()));
+
+        const char* lowered_name;
+        GPULITE_HIPRTC_CALL(hiprtcGetLoweredName(program, this->kernel_name_.c_str(), &lowered_name));
+        hipFunction_t kernel;
+        GPULITE_HIP_CALL(hipModuleGetFunction(&kernel, module, lowered_name));
+
+        this->module_ = module;
+        this->function_ = kernel;
+        this->device_ = device;
+        this->compiled_.store(true, std::memory_order_release);
+
+        GPULITE_HIPRTC_CALL(hiprtcDestroyProgram(&program));
+        this->program_ = nullptr;
+
+        if (device != previousDevice) {
+            GPULITE_HIP_CALL(hipSetDevice(previousDevice));
+        }
     }
 
     void initCudaDriver() {
@@ -465,21 +702,27 @@ private:
             res = CUDADriver::instance().cuInit(0);
             if (res != CUDA_SUCCESS) {
                 throw std::runtime_error(
-                    "KernelFactory::initCudaDriver: Failed to initialize CUDA CUDA_DRIVER_INSTANCE."
+                    "CachedKernelBase::initCudaDriver: Failed to initialize the CUDA driver."
                 );
-                return;
             }
         }
     }
 
+    Api api_;
     std::string kernel_name_;
 
     int current_smem_size_ = 0;
     int max_smem_size_optin_ = 0;
-    CUmodule module_ = nullptr;
-    CUfunction function_ = nullptr;
+    /// `CUmodule` or `hipModule_t`
+    void* module_ = nullptr;
+    /// `CUfunction` or `hipFunction_t`
+    void* function_ = nullptr;
+    /// `nvrtcProgram` or `hiprtcProgram`
+    void* program_ = nullptr;
+    /// CUDA context in which the kernel was loaded (CUDA only)
     CUcontext context_ = nullptr;
-    nvrtcProgram program_ = nullptr;
+    /// Device on which the kernel was loaded (HIP only)
+    int device_ = -1;
     std::atomic<bool> compiled_{false};
     bool debug_ = false;
 
@@ -503,8 +746,8 @@ class CachedKernel : public CachedKernelBase {
 public:
     using CachedKernelBase::CachedKernelBase;
 
-    /// Launch the kernel with typed arguments. Options like grid/block/sync
-    /// are passed in a cudaLaunchConfig_t struct as the first argument.
+    /// Launch the kernel with typed arguments. Options like grid/block/stream
+    /// are passed in a LaunchConfig struct as the first argument.
     template <typename... Ts>
     void launch(const LaunchConfig& config, Ts... args) {
         details::check_tuple_arguments<FuncType, Ts...>();
@@ -517,9 +760,9 @@ public:
 };
 
 
-/// Factory class to create and store compiled cuda kernels for caching as a
-/// simple name-based map. Allows both compiling from a source file, or for
-/// compiling from a variable containing CUDA code.
+/// Factory class to create and store compiled CUDA or HIP kernels for caching
+/// as a simple name-based map. Allows both compiling from a source file, or for
+/// compiling from a variable containing CUDA/HIP code.
 ///
 /// The pointers returned by `create()` and `getKernel()` stay valid for the
 /// whole lifetime of the program, so callers that launch the same kernel many
@@ -531,27 +774,42 @@ class KernelFactory {
     KernelFactory(KernelFactory&&) = delete;
     KernelFactory& operator=(KernelFactory&&) = delete;
 
-    /// Get the singleton instance of the KernelFactory for a given CUDA device.
-    /// This ensures that each CUDA device has its own kernel cache.
-    static KernelFactory& instance(CUdevice device) {
+    /// Get the singleton instance of the KernelFactory for a given API and
+    /// device. This ensures that each device has its own kernel cache. Kernels
+    /// created by this factory are compiled and launched with the given `api`.
+    static KernelFactory& instance(Api api, int device) {
         static std::mutex INSTANCES_MUTEX;
-        static std::vector<std::unique_ptr<KernelFactory>> INSTANCES;
+        static std::vector<std::unique_ptr<KernelFactory>> CUDA_INSTANCES;
+        static std::vector<std::unique_ptr<KernelFactory>> HIP_INSTANCES;
 
         // Different threads can ask for different devices at the same time.
         // The factories are allocated separately and never removed, so the
         // references stay valid when the vector grows, and the lock is only
         // needed while looking up/adding elements.
         if (device < 0) {
-            throw std::runtime_error("invalid CUDA device index: " + std::to_string(device));
+            throw std::runtime_error("invalid device index: " + std::to_string(device));
         }
 
         std::lock_guard<std::mutex> lock(INSTANCES_MUTEX);
-        auto index = static_cast<size_t>(device);
-        while (INSTANCES.size() < index + 1) {
-            INSTANCES.push_back(std::unique_ptr<KernelFactory>(new KernelFactory()));
+        std::vector<std::unique_ptr<KernelFactory>>* instances = nullptr;
+        if (api == Api::CUDA) {
+            instances = &CUDA_INSTANCES;
+        } else {
+            assert(api == Api::HIP);
+            instances = &HIP_INSTANCES;
         }
 
-        return *INSTANCES[index];
+        auto index = static_cast<size_t>(device);
+        while (instances->size() < index + 1) {
+            instances->push_back(std::unique_ptr<KernelFactory>(new KernelFactory(api)));
+        }
+
+        return *(*instances)[index];
+    }
+
+    /// Get the API used by the kernels in this factory
+    Api api() const {
+        return api_;
     }
 
     /// Check if a kernel with the given name exists in the cache.
@@ -619,7 +877,7 @@ class KernelFactory {
     }
 
   private:
-    KernelFactory() {}
+    explicit KernelFactory(Api api): api_(api) {}
 
     /// Find the kernel with the given name in the cache, returning `nullptr` if
     /// it does not exist yet. `kernel_cache_mutex_` must be held by the caller.
@@ -658,7 +916,7 @@ class KernelFactory {
 
         auto name = std::string(kernel_name);
         auto kernel = std::make_unique<CachedKernel<FuncType>>(
-            name, code, path, make_options()
+            api_, name, code, path, make_options()
         );
         auto* ptr = kernel.get();
         kernel_cache_.emplace(std::move(name), std::move(kernel));
@@ -669,6 +927,8 @@ class KernelFactory {
     /// looking up kernels by `std::string_view` without creating a
     /// `std::string`.
     std::map<std::string, std::unique_ptr<CachedKernelBase>, std::less<>> kernel_cache_;
+    /// The API used to compile and launch kernels from this factory
+    Api api_;
     /// Protects `kernel_cache_`. Each device has its own mutex, so threads
     /// working with different devices do not wait for each other.
     std::mutex kernel_cache_mutex_;

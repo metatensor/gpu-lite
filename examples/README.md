@@ -37,9 +37,9 @@ This directory contains comprehensive examples demonstrating how to use gpulite 
 - **Concepts**: cudaHostAlloc, cudaMemcpyAsync, stream-based concurrency
 
 ### 5. HIP Vector Addition (`hip_vector_add/`)
-- **Purpose**: Using gpulite's HIP bindings on AMD GPUs
-- **Features**: Runtime compilation with HIPRTC, module loading and kernel launch
-- **Concepts**: `HIPRuntime`, `HIPRTC`, `GPULITE_HIP_CALL`, `GPULITE_HIPRTC_CALL`
+- **Purpose**: Using gpulite with HIP on AMD GPUs
+- **Features**: Runtime compilation with HIPRTC, kernel caching and type-checked launch
+- **Concepts**: `KernelFactory::instance(gpulite::Api::HIP, device)`, `HIPRuntime`, `GPULITE_HIP_CALL`
 - **Requirements**: ROCm 6+ and an AMD GPU. This does not run on NVIDIA GPUs,
   where HIP is a header-only layer over CUDA without the shared libraries
   gpulite loads. The example reports itself as skipped when HIP is unavailable.
@@ -258,7 +258,7 @@ extern "C" __global__ void my_kernel(float* data, int n) {
 )";
 
 // Compile and cache
-auto* kernel = KernelFactory::instance().create(
+auto* kernel = KernelFactory::instance(gpulite::Api::CUDA, 0).create<void(float*, int)>(
     "my_kernel",
     my_kernel,
     "my_kernel.cu",
