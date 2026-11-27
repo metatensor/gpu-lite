@@ -144,10 +144,13 @@ typedef enum CUjit_option_enum {
 //                 CUDA Runtime API (from cuda_runtime_api.h)                 //
 // ========================================================================== //
 
+#ifndef GPULITE_DIM3_DEFINED
+#define GPULITE_DIM3_DEFINED
 struct dim3 {
     unsigned int x, y, z;
     dim3(unsigned int vx = 1, unsigned int vy = 1, unsigned int vz = 1) : x(vx), y(vy), z(vz) {}
 };
+#endif
 
 enum cudaError {
     cudaSuccess = 0,

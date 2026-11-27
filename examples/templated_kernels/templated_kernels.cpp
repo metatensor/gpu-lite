@@ -68,7 +68,7 @@ __global__ void process_array(T* input, T* output, int n) {
         std::string kernel_name = gpulite::getTemplateKernelName<T>("process_array");
 
         // Create and cache kernel
-        auto& factory = gpulite::KernelFactory::instance(CUdevice(0));
+        auto& factory = gpulite::KernelFactory::instance(gpulite::Api::CUDA, 0);
         std::cout << "Compiling kernel: " << kernel_name << std::endl;
 
         // Kernel declaration matching the source passed to NVRTC
