@@ -12,6 +12,11 @@
     #error "This project requires C++17 or newer (-std=c++17)."
 #endif
 
+// allow including `.cuh` files in the CPU code
+#if !defined(__CUDACC__) && !defined(__global__)
+#define __global__
+#endif
+
 
 #include "./dlopen.hpp"         // IWYU pragma: export
 #include "./cuda_api.hpp"       // IWYU pragma: export

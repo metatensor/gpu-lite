@@ -201,10 +201,35 @@ struct cudaPointerAttributes {
 #define cudaEventWaitDefault                0x00
 #define cudaEventWaitExternal               0x01
 
-// allow including `.cuh` files in the CPU code
-#if !defined(__CUDACC__) && !defined(__global__)
-#define __global__
-#endif
+enum cudaDeviceAttr {
+    cudaDevAttrMaxThreadsPerBlock             = 1,
+    cudaDevAttrMaxBlockDimX                   = 2,
+    cudaDevAttrMaxBlockDimY                   = 3,
+    cudaDevAttrMaxBlockDimZ                   = 4,
+    cudaDevAttrMaxGridDimX                    = 5,
+    cudaDevAttrMaxGridDimY                    = 6,
+    cudaDevAttrMaxGridDimZ                    = 7,
+    cudaDevAttrMaxSharedMemoryPerBlock        = 8,
+    cudaDevAttrTotalConstantMemory            = 9,
+    cudaDevAttrWarpSize                       = 10,
+    cudaDevAttrMaxPitch                       = 11,
+    cudaDevAttrMaxRegistersPerBlock           = 12,
+    cudaDevAttrClockRate                      = 13,
+    cudaDevAttrTextureAlignment               = 14,
+    cudaDevAttrGpuOverlap                     = 15,
+    cudaDevAttrMultiProcessorCount            = 16,
+    cudaDevAttrKernelExecTimeout              = 17,
+    cudaDevAttrIntegrated                     = 18,
+    cudaDevAttrCanMapHostMemory               = 19,
+    cudaDevAttrComputeMode                    = 20,
+    // [...]
+    cudaDevAttrMaxSharedMemoryPerMultiprocessor = 81,
+    cudaDevAttrMaxRegistersPerMultiprocessor  = 82,
+    cudaDevAttrManagedMemory                  = 83,
+    // [...]
+    cudaDevAttrCooperativeLaunch              = 95,
+    // [...]
+};
 
 // ========================================================================== //
 //                          NVRTC API (from nvrtc.h)                          //

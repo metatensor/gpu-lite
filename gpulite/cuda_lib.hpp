@@ -55,6 +55,7 @@ class CUDART {
     using cudaEventQuery_t = cudaError_t (*)(cudaEvent_t);
     using cudaEventElapsedTime_t = cudaError_t (*)(float*, cudaEvent_t, cudaEvent_t);
     using cudaStreamWaitEvent_t = cudaError_t (*)(cudaStream_t, cudaEvent_t, unsigned int);
+    using cudaDeviceGetAttribute_t = cudaError_t (*)(int *value, enum cudaDeviceAttr attr, int device);
 
     cudaGetDeviceCount_t cudaGetDeviceCount;
     cudaGetDevice_t cudaGetDevice;
@@ -86,6 +87,7 @@ class CUDART {
     cudaEventQuery_t cudaEventQuery;
     cudaEventElapsedTime_t cudaEventElapsedTime;
     cudaStreamWaitEvent_t cudaStreamWaitEvent;
+    cudaDeviceGetAttribute_t cudaDeviceGetAttribute;
 
     CUDART() {
 #if defined(__linux__) || defined(__APPLE__)
@@ -174,6 +176,7 @@ class CUDART {
             cudaEventQuery = details::loadSymbol<cudaEventQuery_t>(cudartHandle, "cudaEventQuery");
             cudaEventElapsedTime = details::loadSymbol<cudaEventElapsedTime_t>(cudartHandle, "cudaEventElapsedTime");
             cudaStreamWaitEvent = details::loadSymbol<cudaStreamWaitEvent_t>(cudartHandle, "cudaStreamWaitEvent");
+            cudaDeviceGetAttribute = details::loadSymbol<cudaDeviceGetAttribute_t>(cudartHandle, "cudaDeviceGetAttribute");
         }
     }
 
